@@ -164,6 +164,9 @@ public:
         std::uint32_t trackId = 0;
         SurfaceRect rect{};
         bool selected = false;
+        bool automation = false;
+        bool resizeLeftHot = false;
+        bool resizeRightHot = false;
     };
 
     struct UiNoteVisual
@@ -172,6 +175,7 @@ public:
         int step = 0;
         SurfaceRect rect{};
         bool selected = false;
+        bool resizeRightHot = false;
     };
 
     struct SurfaceInteractionState
@@ -180,13 +184,19 @@ public:
         bool mouseDown = false;
         bool draggingClip = false;
         bool draggingNote = false;
+        bool resizingClipLeft = false;
+        bool resizingClipRight = false;
+        bool resizingNote = false;
         bool marqueeActive = false;
         bool browserDragActive = false;
+        bool editingAutomationPoint = false;
         POINT dragStart{};
         POINT dragCurrent{};
         std::uint32_t selectedClipId = 0;
         std::size_t selectedNoteIndex = static_cast<std::size_t>(-1);
         std::size_t selectedBrowserItemIndex = static_cast<std::size_t>(-1);
+        std::size_t selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
+        std::size_t selectedAutomationPointIndex = static_cast<std::size_t>(-1);
         RECT marqueeRect{};
         std::vector<UiClipVisual> playlistClipVisuals;
         std::vector<UiNoteVisual> pianoNoteVisuals;
@@ -240,6 +250,131 @@ public:
         EditorTool playlistTool = EditorTool::Draw;
         EditorTool pianoTool = EditorTool::Draw;
         WorkspacePane focusedPane = WorkspacePane::Playlist;
+    };
+
+    struct BrowserEntry
+    {
+        std::string category;
+        std::string label;
+        std::string subtitle;
+        bool favorite = false;
+    };
+
+    struct ChannelStepState
+    {
+        bool enabled = false;
+        int velocity = 100;
+    };
+
+    struct PianoNoteState
+    {
+        int lane = 0;
+        int step = 0;
+        int length = 2;
+        int velocity = 100;
+        bool accent = false;
+        bool slide = false;
+        bool selected = false;
+    };
+
+    struct PatternLaneState
+    {
+        std::uint32_t trackId = 0;
+        std::string name;
+        std::vector<ChannelStepState> steps;
+        std::vector<PianoNoteState> notes;
+        int swing = 0;
+        int shuffle = 0;
+    };
+
+    struct PatternState
+    {
+        int patternNumber = 1;
+        std::string name;
+        std::vector<PatternLaneState> lanes;
+        int lengthInBars = 2;
+        int accentAmount = 0;
+    };
+
+    struct PlaylistBlockState
+    {
+        std::uint32_t clipId = 0;
+        std::uint32_t trackId = 0;
+        int lane = 0;
+        int startCell = 0;
+        int lengthCells = 4;
+        std::string label;
+        std::string clipType;
+        int patternNumber = 0;
+        bool muted = false;
+        bool selected = false;
+    };
+
+    struct MixerStripState
+    {
+        std::uint32_t busId = 0;
+        std::string name;
+        int insertSlot = 0;
+        double volumeDb = -3.0;
+        double pan = 0.0;
+        int peakLevel = 0;
+        bool solo = false;
+        bool muted = false;
+        int routeTarget = -1;
+        double sendAmount = 0.0;
+        std::vector<std::string> effects;
+    };
+
+    struct ChannelSettingsState
+    {
+        std::uint32_t trackId = 0;
+        std::string name;
+        double gain = 0.8;
+        double pan = 0.0;
+        double pitchSemitones = 0.0;
+        double attackMs = 12.0;
+        double releaseMs = 180.0;
+        double filterCutoffHz = 8400.0;
+        double resonance = 0.2;
+        int mixerInsert = 1;
+        int routeTarget = 0;
+        bool reverse = false;
+        bool timeStretch = true;
+        std::vector<std::string> pluginRack;
+        std::vector<std::string> presets;
+    };
+
+    struct PlaylistMarkerState
+    {
+        std::string name;
+        int timelineCell = 0;
+    };
+
+    struct AutomationLaneState
+    {
+        std::string target;
+        std::vector<int> values;
+        std::uint32_t clipId = 0;
+        int lane = 0;
+        int startCell = 0;
+        int lengthCells = 8;
+        bool selected = false;
+        std::size_t selectedPoint = static_cast<std::size_t>(-1);
+    };
+
+    struct WorkspaceModel
+    {
+        std::vector<BrowserEntry> browserEntries;
+        std::vector<PatternState> patterns;
+        std::vector<PatternLaneState> patternLanes;
+        std::vector<PlaylistBlockState> playlistBlocks;
+        std::vector<MixerStripState> mixerStrips;
+        std::vector<ChannelSettingsState> channelSettings;
+        std::vector<PlaylistMarkerState> markers;
+        std::vector<AutomationLaneState> automationLanes;
+        int activeChannelIndex = 0;
+        int selectedPatternIndex = 0;
+        int selectedBrowserIndex = 0;
     };
 
 public:
@@ -344,6 +479,19 @@ private:
     void handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y);
     void handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARAM flags);
     void handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y);
+    void syncWorkspaceModel();
+    void rebuildBrowserEntries();
+    void ensurePatternBank();
+    void rebuildPatternLanes();
+    void rebuildPlaylistBlocks();
+    void rebuildMixerStrips();
+    void rebuildChannelSettings();
+    void rebuildAutomationLanes();
+    PatternState makePatternState(int patternNumber) const;
+    void ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex);
+    void drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const;
+    void drawSurfaceFrame(HDC dc, const RECT& rect, COLORREF borderColor) const;
+    std::string browserDropTargetLabel() const;
     void rebuildPlaylistVisuals(const RECT& rect);
     void rebuildPianoVisuals(const RECT& rect);
     int clampValue(int value, int minValue, int maxValue) const;
@@ -579,6 +727,7 @@ private:
     SurfaceInteractionState interactionState_{};
     std::vector<DockedPaneState> dockedPanes_{};
     WorkspaceState workspace_{};
+    WorkspaceModel workspaceModel_{};
     std::size_t selectedTrackIndex_ = 0;
 };
 
