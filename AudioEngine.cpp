@@ -2146,7 +2146,7 @@ bool AudioEngine::openWasapiBackend()
 
     REFERENCE_TIME requestedDuration = static_cast<REFERENCE_TIME>(
         (10'000'000.0 * static_cast<double>(config_.preferredBlockSize)) /
-        static_cast<double>(std::max(1u, mixFormat->nSamplesPerSec)));
+        static_cast<double>(std::max<DWORD>(1u, mixFormat->nSamplesPerSec)));
 
     DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
     hr = audioClient->Initialize(
