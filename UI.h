@@ -180,6 +180,7 @@ private:
     void requestAddTrack();
     void requestAddBus();
     void requestAddClip();
+    void requestNewProject();
     void requestUndo();
     void requestRedo();
     void requestSaveProject();
@@ -363,4 +364,5 @@ private:
     WorkspaceState workspace_{};
     std::size_t selectedTrackIndex_ = 0;
 };
+
 
