@@ -578,10 +578,10 @@ void UI::paintMainBackground(HDC dc) const
     const int transportX = spectrumPanelX + spectrumPanelWidth + 28;
     const int transportY = topPanelY + 18;
     const int patternClusterWidth = 154;
-    const int patternClusterX =
-        std::min(
-            clientRect.right - kOuterPadding - patternClusterWidth - 20,
-            std::max(transportX + 320, clientRect.right - 460));
+    const int clientRight = static_cast<int>(clientRect.right);
+    const int patternClusterLimit = clientRight - kOuterPadding - patternClusterWidth - 20;
+    const int patternClusterDesired = std::max(transportX + 320, clientRight - 460);
+    const int patternClusterX = std::min(patternClusterLimit, patternClusterDesired);
 
     RECT timeDisplayRect{timePanelX, timePanelY, timePanelX + timePanelWidth, timePanelY + displayHeight};
     fillRectColor(dc, timeDisplayRect, RGB(83, 101, 103));
@@ -1059,3 +1059,4 @@ std::string UI::browserDropTargetLabel() const
     const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
     return entry.label + " -> Rack / Playlist / Mixer";
 }
+
