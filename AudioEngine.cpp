@@ -1511,6 +1511,57 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     return true;
 }
 
+bool AudioEngine::newProject(const std::string& name)
+{
+    clearError();
+
+    config_.projectName = name.empty() ? "Untitled Project" : name;
+
+    editableGraph_ = {};
+    pendingGraph_ = {};
+    compiledGraph_ = {};
+    graphSwapPending_ = false;
+
+    automationLanes_.clear();
+    latencyStates_.clear();
+    delayLines_.clear();
+
+    {
+        std::lock_guard<std::mutex> cacheLock(clipCacheMutex_);
+        clipCache_.clear();
+    }
+    metrics_.cachedClipCount = 0;
+
+    {
+        std::lock_guard<std::mutex> diskLock(diskQueueMutex_);
+        diskReadQueue_.clear();
+    }
+
+    undoStack_.clear();
+    redoStack_.clear();
+    lastOfflineRenderRequest_.reset();
+
+    if (!initializeProjectState())
+    {
+        setError(kErrorProjectIo, "Failed to create a new project state.");
+        return false;
+    }
+
+    transportInfo_.state = TransportState::Stopped;
+    transportInfo_.timelineSeconds = 0.0;
+    transportInfo_.samplePosition = 0;
+
+    if (!buildInitialGraph() || !compileGraph())
+    {
+        setError(kErrorGraphBuild, "Failed to initialize graph for new project.");
+        return false;
+    }
+
+    updateStatusFromState();
+    publishSnapshot();
+    return true;
+}
+
 bool AudioEngine::saveProject(const std::string& path)
 {
     const std::string resolvedPath = path.empty() ? config_.sessionPath : path;
@@ -1584,70 +1635,106 @@ bool AudioEngine::loadProject(const std::string& path)
     ProjectState loadedProject{};
     loadedProject.sessionPath = resolvedPath;
 
-    std::string line;
-    while (std::getline(stream, line))
+    try
     {
-        if (line.empty())
+        std::string line;
+        while (std::getline(stream, line))
         {
-            continue;
-        }
+            if (line.empty())
+            {
+                continue;
+            }
 
-        const std::vector<std::string> parts = splitString(line, '|');
-        if (parts.empty())
-        {
-            continue;
-        }
+            const std::vector<std::string> parts = splitString(line, '|');
+            if (parts.empty())
+            {
+                continue;
+            }
 
-        if (parts[0] == "PROJECT" && parts.size() >= 4)
-        {
-            loadedProject.projectName = parts[1];
-            loadedProject.sessionPath = parts[2];
-            loadedProject.revision = static_cast<std::uint64_t>(std::stoull(parts[3]));
+            if (parts[0] == "PROJECT" && parts.size() >= 4)
+            {
+                loadedProject.projectName = parts[1];
+                loadedProject.sessionPath = parts[2];
+                loadedProject.revision = static_cast<std::uint64_t>(std::stoull(parts[3]));
+            }
+            else if (parts[0] == "BUS" && parts.size() >= 3)
+            {
+                loadedProject.buses.push_back(BusState{
+                    static_cast<std::uint32_t>(std::stoul(parts[1])),
+                    parts[2],
+                    {}});
+            }
+            else if (parts[0] == "TRACK" && parts.size() >= 7)
+            {
+                loadedProject.tracks.push_back(TrackState{
+                    static_cast<std::uint32_t>(std::stoul(parts[1])),
+                    static_cast<std::uint32_t>(std::stoul(parts[2])),
+                    parts[3],
+                    parts[4] == "1",
+                    parts[5] == "1",
+                    parts[6] == "1",
+                    {},
+                    {}});
+            }
+            else if (parts[0] == "CLIP" && parts.size() >= 10)
+            {
+                ClipState clip{};
+                clip.clipId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                clip.trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                clip.name = parts[3];
+                clip.sourceType = static_cast<ClipSourceType>(std::stoi(parts[4]));
+                clip.filePath = parts[5];
+                clip.startTimeSeconds = std::stod(parts[6]);
+                clip.durationSeconds = std::stod(parts[7]);
+                clip.gain = std::stod(parts[8]);
+                clip.muted = parts[9] == "1";
+                loadedProject.clips.push_back(clip);
+            }
+            else if (parts[0] == "MARKER" && parts.size() >= 4)
+            {
+                loadedProject.markers.push_back(MarkerState{
+                    static_cast<std::uint32_t>(std::stoul(parts[1])),
+                    parts[2],
+                    std::stod(parts[3])});
+            }
         }
-        else if (parts[0] == "BUS" && parts.size() >= 3)
-        {
-            loadedProject.buses.push_back(BusState{
-                static_cast<std::uint32_t>(std::stoul(parts[1])),
-                parts[2],
-                {}});
-        }
-        else if (parts[0] == "TRACK" && parts.size() >= 7)
-        {
-            loadedProject.tracks.push_back(TrackState{
-                static_cast<std::uint32_t>(std::stoul(parts[1])),
-                static_cast<std::uint32_t>(std::stoul(parts[2])),
-                parts[3],
-                parts[4] == "1",
-                parts[5] == "1",
-                parts[6] == "1",
-                {},
-                {}});
-        }
-        else if (parts[0] == "CLIP" && parts.size() >= 10)
-        {
-            ClipState clip{};
-            clip.clipId = static_cast<std::uint32_t>(std::stoul(parts[1]));
-            clip.trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
-            clip.name = parts[3];
-            clip.sourceType = static_cast<ClipSourceType>(std::stoi(parts[4]));
-            clip.filePath = parts[5];
-            clip.startTimeSeconds = std::stod(parts[6]);
-            clip.durationSeconds = std::stod(parts[7]);
-            clip.gain = std::stod(parts[8]);
-            clip.muted = parts[9] == "1";
-            loadedProject.clips.push_back(clip);
-        }
-        else if (parts[0] == "MARKER" && parts.size() >= 4)
-        {
-            loadedProject.markers.push_back(MarkerState{
-                static_cast<std::uint32_t>(std::stoul(parts[1])),
-                parts[2],
-                std::stod(parts[3])});
-        }
+    }
+    catch (const std::exception&)
+    {
+        setError(kErrorProjectIo, "Session file is malformed or contains unsupported values.");
+        return false;
+    }
+
+    if (loadedProject.projectName.empty())
+    {
+        loadedProject.projectName = std::filesystem::path(resolvedPath).stem().string();
+    }
+
+    if (loadedProject.buses.empty())
+    {
+        loadedProject.buses.push_back(BusState{1, "Main Bus", {}});
+    }
+
+    if (loadedProject.tracks.empty())
+    {
+        loadedProject.tracks.push_back(TrackState{
+            1,
+            loadedProject.buses.front().busId,
+            "Track 1",
+            false,
+            false,
+            false,
+            {},
+            {}});
     }
 
     for (auto& track : loadedProject.tracks)
     {
+        if (track.busId == 0)
+        {
+            track.busId = loadedProject.buses.front().busId;
+        }
+
         for (const auto& clip : loadedProject.clips)
         {
             if (clip.trackId == track.trackId)
@@ -1669,11 +1756,16 @@ bool AudioEngine::loadProject(const std::string& path)
 
     projectState_ = std::move(loadedProject);
     projectState_.dirty = false;
+    projectState_.revision = std::max<std::uint64_t>(1, projectState_.revision + 1);
     undoStack_.clear();
     redoStack_.clear();
 
     config_.projectName = projectState_.projectName;
     config_.sessionPath = projectState_.sessionPath;
+
+    transportInfo_.state = TransportState::Stopped;
+    transportInfo_.timelineSeconds = 0.0;
+    transportInfo_.samplePosition = 0;
 
     requestGraphRebuild();
     publishSnapshot();
@@ -3426,6 +3518,10 @@ void AudioEngine::processPendingCommands()
     {
         switch (command.type)
         {
+        case CommandType::NewProject:
+            newProject(command.textValue);
+            break;
+
         case CommandType::StartEngine:
             start();
             break;
