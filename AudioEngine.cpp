@@ -1511,6 +1511,60 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     return true;
 }
 
+bool AudioEngine::moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, double startTimeSeconds)
+{
+    auto clipIt = std::find_if(
+        projectState_.clips.begin(),
+        projectState_.clips.end(),
+        [&](const ClipState& clip) { return clip.clipId == clipId; });
+
+    if (clipIt == projectState_.clips.end())
+    {
+        setError(kErrorProjectIo, "Clip not found while moving clip.");
+        return false;
+    }
+
+    auto targetTrackIt = std::find_if(
+        projectState_.tracks.begin(),
+        projectState_.tracks.end(),
+        [&](const TrackState& track) { return track.trackId == targetTrackId; });
+
+    if (targetTrackIt == projectState_.tracks.end())
+    {
+        setError(kErrorProjectIo, "Target track not found while moving clip.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+    const std::uint32_t previousTrackId = clipIt->trackId;
+
+    if (previousTrackId != targetTrackId)
+    {
+        auto previousTrackIt = std::find_if(
+            projectState_.tracks.begin(),
+            projectState_.tracks.end(),
+            [&](const TrackState& track) { return track.trackId == previousTrackId; });
+
+        if (previousTrackIt != projectState_.tracks.end())
+        {
+            previousTrackIt->clipIds.erase(
+                std::remove(previousTrackIt->clipIds.begin(), previousTrackIt->clipIds.end(), clipId),
+                previousTrackIt->clipIds.end());
+        }
+
+        targetTrackIt->clipIds.push_back(clipId);
+        clipIt->trackId = targetTrackId;
+    }
+
+    clipIt->startTimeSeconds = std::max(0.0, startTimeSeconds);
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Move clip", beforeState);
+    requestGraphRebuild();
+    publishSnapshot();
+    return true;
+}
+
 bool AudioEngine::newProject(const std::string& name)
 {
     clearError();
@@ -3606,6 +3660,13 @@ void AudioEngine::processPendingCommands()
             addClipToTrack(static_cast<std::uint32_t>(command.uintValue), command.textValue);
             break;
 
+        case CommandType::MoveClip:
+            moveClip(
+                static_cast<std::uint32_t>(command.uintValue),
+                static_cast<std::uint32_t>(command.secondaryUintValue),
+                command.doubleValue);
+            break;
+
         case CommandType::SaveProject:
             saveProject(command.textValue.empty() ? config_.sessionPath : command.textValue);
             break;
@@ -3628,4 +3689,3 @@ void AudioEngine::processPendingCommands()
         }
     }
 }
-
