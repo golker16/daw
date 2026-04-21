@@ -121,6 +121,7 @@ public:
         AddTrack,
         AddBus,
         AddClipToTrack,
+        MoveClip,
         SaveProject,
         LoadProject,
         UndoEdit,
@@ -716,6 +717,7 @@ public:
     bool addTrack(const std::string& name);
     bool addBus(const std::string& name);
     bool addClipToTrack(std::uint32_t trackId, const std::string& clipName);
+    bool moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, double startTimeSeconds);
     bool newProject(const std::string& name);
     bool saveProject(const std::string& path);
     bool loadProject(const std::string& path);
@@ -844,4 +846,5 @@ private:
     mutable std::mutex clipCacheMutex_;
     mutable std::mutex pluginMutex_;
 };
+
 
