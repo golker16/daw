@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <sstream>
 #include <string>
@@ -19,6 +20,13 @@ namespace
     constexpr int kPluginHeight = 150;
     constexpr int kMixerHeight = 190;
     constexpr int kSectionHeaderHeight = 24;
+    constexpr int kStepCount = 16;
+    constexpr int kPlaylistCellCount = 32;
+    constexpr int kPianoLaneCount = 24;
+
+    constexpr const char* kNoteNames[12] = {
+        "C", "C#", "D", "D#", "E", "F",
+        "F#", "G", "G#", "A", "A#", "B"};
 
     std::string boolLabel(bool value, const char* onText, const char* offText)
     {
@@ -37,6 +45,19 @@ namespace
         case UI::WorkspacePane::Plugin: return "Plugin";
         default: return "Workspace";
         }
+    }
+
+    std::string noteLabelFromLane(int lane)
+    {
+        const int midiNote = 36 + std::max(0, lane);
+        const int octave = (midiNote / 12) - 1;
+        return std::string(kNoteNames[midiNote % 12]) + std::to_string(octave);
+    }
+
+    int normalizedMeterFill(double valueDb)
+    {
+        const double normalized = std::clamp((valueDb + 18.0) / 18.0, 0.1, 1.0);
+        return static_cast<int>(normalized * 100.0 + 0.5);
     }
 }
 
@@ -924,6 +945,7 @@ void UI::refreshFromEngineSnapshot()
     }
 
     workspace_.tempoBpm = std::max(10.0, std::min(522.0, engine_.getTransportInfo().tempoBpm));
+    syncWorkspaceModel();
 
     updateTransportControls();
     updateStatusLabel();
@@ -1695,12 +1717,16 @@ void UI::selectPreviousTrack()
 
 void UI::selectNextPattern()
 {
-    workspace_.activePattern = std::min(999, workspace_.activePattern + 1);
+    const int patternCount = std::max(1, static_cast<int>(workspaceModel_.patterns.size()));
+    workspace_.activePattern = (workspace_.activePattern % patternCount) + 1;
+    syncWorkspaceModel();
 }
 
 void UI::selectPreviousPattern()
 {
-    workspace_.activePattern = std::max(1, workspace_.activePattern - 1);
+    const int patternCount = std::max(1, static_cast<int>(workspaceModel_.patterns.size()));
+    workspace_.activePattern = workspace_.activePattern <= 1 ? patternCount : workspace_.activePattern - 1;
+    syncWorkspaceModel();
 }
 
 void UI::cycleZoom(bool pianoRoll, int delta)
@@ -1861,60 +1887,21 @@ std::string UI::buildBrowserPanelText() const
 {
     std::ostringstream browser;
     browser << "Browser\n\n";
-
-    if (workspace_.browserTabIndex == 0)
+    for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
     {
+        const BrowserEntry& entry = workspaceModel_.browserEntries[index];
         browser
-            << "Packs / Samples\n"
-            << "  - Drums > Kicks\n"
-            << "  - Drums > Snares\n"
-            << "  - Drums > Hats\n"
-            << "  - Loops > Percussion\n"
-            << "  - FX > Risers\n"
-            << "  - Instruments > Multi-samples\n";
-    }
-    else if (workspace_.browserTabIndex == 1)
-    {
-        browser
-            << "Plugin Database\n"
-            << "  - Generators > Sampler\n"
-            << "  - Generators > Synth Lead\n"
-            << "  - Generators > Bass Module\n"
-            << "  - Effects > EQ\n"
-            << "  - Effects > Compressor\n"
-            << "  - Effects > Reverb\n";
-    }
-    else if (workspace_.browserTabIndex == 2)
-    {
-        browser
-            << "Current Project\n"
-            << "  - Patterns " << std::max<std::size_t>(1, visibleState_.project.tracks.size()) << "\n"
-            << "  - Mixer states " << visibleState_.project.buses.size() << "\n"
-            << "  - Automation clips " << visibleState_.project.tracks.size() << "\n"
-            << "  - Project bones\n";
-    }
-    else if (workspace_.browserTabIndex == 3)
-    {
-        browser
-            << "Automation / Scores\n"
-            << "  - Volume envelopes\n"
-            << "  - Filter cutoff\n"
-            << "  - Pan lanes\n"
-            << "  - MIDI scores\n"
-            << "  - Articulation maps\n";
-    }
-    else
-    {
-        browser
-            << "Linked Folders / Disk\n"
-            << "  - " << (visibleState_.document.sessionPath.empty() ? "<unsaved project>" : visibleState_.document.sessionPath) << "\n"
-            << "  - Audio renders\n"
-            << "  - User presets\n"
-            << "  - Imported loops\n";
+            << (static_cast<int>(index) == workspaceModel_.selectedBrowserIndex ? "> " : "  ")
+            << entry.category << " | " << entry.label;
+        if (entry.favorite)
+        {
+            browser << " | Fav";
+        }
+        browser << "\n    " << entry.subtitle << "\n";
     }
 
     browser
-        << "\nDrag-drop target: Channel Rack, Playlist or Mixer"
+        << "\nDrag-drop target: " << browserDropTargetLabel()
         << "\nAlt+F8 toggles this panel.";
     return browser.str();
 }
@@ -1923,68 +1910,111 @@ std::string UI::buildChannelRackPanelText() const
 {
     std::ostringstream rack;
     rack << "Channel Rack\n\n";
-    if (visibleState_.project.tracks.empty())
+    if (workspaceModel_.patternLanes.empty())
     {
         rack << "No channels yet.\nUse Add Track to create instruments, samplers or automation channels.";
         return rack.str();
     }
 
-    for (std::size_t index = 0; index < visibleState_.project.tracks.size(); ++index)
+    for (std::size_t index = 0; index < workspaceModel_.patternLanes.size(); ++index)
     {
-        const VisibleTrack& track = visibleState_.project.tracks[index];
+        const PatternLaneState& lane = workspaceModel_.patternLanes[index];
+        int enabledSteps = 0;
+        for (const auto& step : lane.steps)
+        {
+            enabledSteps += step.enabled ? 1 : 0;
+        }
         rack
             << (index == selectedTrackIndex_ ? "> " : "  ")
-            << track.name
-            << " | M " << boolLabel(track.muted, "On", "Off")
-            << " | P C"
-            << " | V " << (track.muted ? "0%" : "82%")
-            << " | FX " << track.busId
-            << " | Steps " << std::max<std::size_t>(4, track.clips.size() * 4)
+            << lane.name
+            << " | Steps " << enabledSteps << '/' << lane.steps.size()
+            << " | Swing " << lane.swing
+            << " | Shuffle " << lane.shuffle
+            << " | Notes " << lane.notes.size()
             << "\n";
     }
 
-    rack << "\nEvery row acts like a channel: mute, pan, volume, mixer destination and step source.";
+    rack << "\nCada fila ya modela un canal con secuencia, notas y groove por patrón.";
     return rack.str();
 }
 
 std::string UI::buildStepSequencerPanelText() const
 {
-    const std::string selectedName =
-        visibleState_.selection.selectedTrackName.empty() ? std::string("Selected channel") : visibleState_.selection.selectedTrackName;
+    if (workspaceModel_.patternLanes.empty())
+    {
+        return "Step Sequencer\n\nNo active channels.";
+    }
+
+    const int laneIndex = clampValue(workspaceModel_.activeChannelIndex, 0, static_cast<int>(workspaceModel_.patternLanes.size() - 1));
+    const PatternLaneState& lane = workspaceModel_.patternLanes[static_cast<std::size_t>(laneIndex)];
 
     std::ostringstream steps;
     steps
         << "Step Sequencer\n\n"
-        << selectedName << "\n"
-        << "Bars 1-2 | Snap " << currentSnapLabel() << "\n\n"
-        << "Kick  : x . . x  . . x .  x . . x  . . x .\n"
-        << "Snare : . . x .  . . x .  . . x .  . . x .\n"
-        << "Hat   : x x x x  x x x x  x x x x  x x x x\n"
-        << "Clap  : . . . .  x . . .  . . . .  x . . .\n"
-        << "\nUse draw/paint for fast drum programming before opening Piano Roll.";
+        << lane.name << "\n"
+        << "Pattern " << workspace_.activePattern
+        << " | Snap " << currentSnapLabel()
+        << " | Swing " << lane.swing
+        << " | Shuffle " << lane.shuffle
+        << "\n\n";
+
+    for (std::size_t step = 0; step < lane.steps.size(); ++step)
+    {
+        const ChannelStepState& cell = lane.steps[step];
+        steps << (cell.enabled ? 'x' : '.');
+        if ((step + 1) % 4 == 0)
+        {
+            steps << ' ';
+        }
+    }
+    steps
+        << "\nVelocity lane: ";
+    for (std::size_t step = 0; step < lane.steps.size(); ++step)
+    {
+        steps << (lane.steps[step].enabled ? std::to_string(lane.steps[step].velocity / 10) : "-");
+        if ((step + 1) % 4 == 0)
+        {
+            steps << ' ';
+        }
+    }
+    steps << "\nClick cells here to toggle the pattern like FL step programming.";
     return steps.str();
 }
 
 std::string UI::buildPianoRollPanelText() const
 {
+    if (workspaceModel_.patternLanes.empty())
+    {
+        return "Piano Roll\n\nNo pattern lane selected.";
+    }
+
+    const int laneIndex = clampValue(workspaceModel_.activeChannelIndex, 0, static_cast<int>(workspaceModel_.patternLanes.size() - 1));
+    const PatternLaneState& lane = workspaceModel_.patternLanes[static_cast<std::size_t>(laneIndex)];
     std::ostringstream piano;
     piano
         << "Piano Roll\n\n"
-        << "Target Channel: "
-        << (visibleState_.selection.selectedTrackName.empty() ? "<none>" : visibleState_.selection.selectedTrackName)
+        << "Target Channel: " << lane.name
         << "\nPattern: " << workspace_.activePattern
         << " | Snap: " << currentSnapLabel()
         << " | Zoom: " << currentZoomLabel(true)
         << " | Tool: " << currentToolLabel(true)
-        << "\nGhost notes: visible | Helpers: on | Velocity lane: visible\n\n"
-        << "C6 |----------------[]--------------|\n"
-        << "A5 |----------[]----------[]--------|\n"
-        << "G5 |------[]------------------------|\n"
-        << "E5 |--[]----------[]----------------|\n"
-        << "C5 |[]----------------------[]------|\n"
-        << "    1.1   1.2   1.3   1.4   2.1   2.2\n\n"
-        << "Velocity  | 84  72  91  68  95  76"
-        << "\nSlide/porta/color lanes are represented conceptually here.";
+        << "\nGhost notes: visible | Helpers: on | Velocity lane: visible | Notes: " << lane.notes.size()
+        << "\nRange: " << noteLabelFromLane(0) << " .. " << noteLabelFromLane(kPianoLaneCount - 1)
+        << "\n\n";
+
+    for (const auto& note : lane.notes)
+    {
+        piano
+            << noteLabelFromLane(note.lane)
+            << " @ " << note.step
+            << " len " << note.length
+            << " vel " << note.velocity
+            << (note.slide ? " | slide" : "")
+            << (note.accent ? " | accent" : "")
+            << "\n";
+    }
+
+    piano << "\nDrag notes to reshape melodies and accents inside the active pattern.";
     return piano.str();
 }
 
@@ -1997,35 +2027,62 @@ std::string UI::buildPlaylistPanelText() const
         << " | Pattern: " << workspace_.activePattern
         << " | Zoom: " << currentZoomLabel(false)
         << " | Tool: " << currentToolLabel(false)
+        << " | Patterns loaded: " << workspaceModel_.patterns.size()
         << "\nTimeline: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8\n\n";
 
-    if (visibleState_.project.tracks.empty())
+    if (workspaceModel_.playlistBlocks.empty() && workspaceModel_.automationLanes.empty())
     {
         playlist << "Track 1  [empty lane]\n";
     }
     else
     {
-        for (std::size_t lane = 0; lane < visibleState_.project.tracks.size(); ++lane)
+        const int laneCount = std::max(1, static_cast<int>(workspaceModel_.patternLanes.size() + workspaceModel_.automationLanes.size()));
+        for (int lane = 0; lane < laneCount; ++lane)
         {
-            const VisibleTrack& track = visibleState_.project.tracks[lane];
-            playlist << "Lane " << (lane + 1) << " " << track.name << " : ";
-            if (track.clips.empty())
+            const std::string laneName =
+                lane < static_cast<int>(workspaceModel_.patternLanes.size())
+                    ? workspaceModel_.patternLanes[static_cast<std::size_t>(lane)].name
+                    : ("Auto " + workspaceModel_.automationLanes[static_cast<std::size_t>(lane - static_cast<int>(workspaceModel_.patternLanes.size()))].target);
+            playlist << "Lane " << (lane + 1) << " " << laneName << " : ";
+
+            bool any = false;
+            for (const auto& block : workspaceModel_.playlistBlocks)
+            {
+                if (block.lane == lane)
+                {
+                    playlist << "[" << block.label << " @" << block.startCell << " len " << block.lengthCells << " " << block.clipType;
+                    if (block.patternNumber > 0)
+                    {
+                        playlist << " P" << block.patternNumber;
+                    }
+                    playlist << "] ";
+                    any = true;
+                }
+            }
+            for (const auto& automation : workspaceModel_.automationLanes)
+            {
+                if (automation.lane == lane)
+                {
+                    playlist << "[Auto " << automation.target << " @" << automation.startCell << " len " << automation.lengthCells << "] ";
+                    any = true;
+                }
+            }
+            if (!any)
             {
                 playlist << "[empty]";
-            }
-            else
-            {
-                for (const auto& clip : track.clips)
-                {
-                    playlist << "[" << clip.name << " @" << clip.startTimeSeconds << "s len " << clip.durationSeconds << "s] ";
-                }
             }
             playlist << "\n";
         }
     }
 
     playlist
-        << "\nPattern Clips, Audio Clips and Automation Clips live in the same timeline."
+        << "\nMarkers: ";
+    for (const auto& marker : workspaceModel_.markers)
+    {
+        playlist << "[" << marker.name << " @" << marker.timelineCell << "] ";
+    }
+    playlist
+        << "\nPattern Clips, Audio Clips and Automation Clips share the same arranger."
         << "\nThis is the arrangement view targeted by F5.";
     return playlist.str();
 }
@@ -2039,46 +2096,77 @@ std::string UI::buildMixerPanelText() const
         << "% | Peak " << visibleState_.peakBlockTimeUs
         << " us | Latency " << visibleState_.currentLatencySamples << " smp\n\n";
 
-    if (visibleState_.project.buses.empty())
+    for (const auto& strip : workspaceModel_.mixerStrips)
     {
-        mixer << "Insert 1 | Fader -6.0 dB | Pan C | FX 1 Empty | Route -> Master\n";
-        mixer << "Insert 2 | Fader -3.0 dB | Pan C | FX 1 Empty | Route -> Master\n";
-    }
-    else
-    {
-        for (const auto& bus : visibleState_.project.buses)
+        mixer
+            << (strip.name == "Master" ? "Master" : ("Insert " + std::to_string(strip.insertSlot)))
+            << " | " << strip.name
+            << " | Fader " << strip.volumeDb << " dB"
+            << " | Pan " << (strip.pan == 0.0 ? "C" : (strip.pan < 0.0 ? "L" : "R"))
+            << " | Meter " << strip.peakLevel << "%"
+            << " | Route " << (strip.routeTarget < 0 ? std::string("Master") : ("Ins " + std::to_string(strip.routeTarget + 1)))
+            << " | Send " << static_cast<int>(strip.sendAmount * 100.0 + 0.5) << "% | FX ";
+        for (std::size_t fx = 0; fx < strip.effects.size(); ++fx)
         {
-            mixer
-                << bus.name
-                << " | Inputs " << bus.inputTrackIds.size()
-                << " | Fader -3.0 dB | Pan C | FX 1 EQ | FX 2 Comp | Route -> Master\n";
+            mixer << strip.effects[fx];
+            if (fx + 1 < strip.effects.size())
+            {
+                mixer << '/';
+            }
         }
+        mixer << "\n";
     }
 
-    mixer << "\nRouting, sends, insert FX and metering are represented in this strip view.";
+    mixer << "\nRouting, sends, insert FX and metering are represented in this strip rack.";
     return mixer.str();
 }
 
 std::string UI::buildPluginPanelText() const
 {
+    const ChannelSettingsState* channel = nullptr;
+    if (!workspaceModel_.channelSettings.empty())
+    {
+        const int channelIndex = clampValue(workspaceModel_.activeChannelIndex, 0, static_cast<int>(workspaceModel_.channelSettings.size() - 1));
+        channel = &workspaceModel_.channelSettings[static_cast<std::size_t>(channelIndex)];
+    }
+
     std::ostringstream plugin;
     plugin
         << "Plugin / Channel Settings\n\n"
-        << "Target: " << (visibleState_.selection.selectedTrackName.empty() ? "<none>" : visibleState_.selection.selectedTrackName) << "\n"
+        << "Target: " << (channel == nullptr ? (visibleState_.selection.selectedTrackName.empty() ? "<none>" : visibleState_.selection.selectedTrackName) : channel->name) << "\n"
         << "Wrapper: " << boolLabel(visibleState_.pluginHostEnabled, "Plugin host enabled", "In-process") << "\n"
         << "Sandbox: " << boolLabel(visibleState_.pluginSandboxEnabled, "On", "Off") << "\n"
         << "64-bit path: " << boolLabel(visibleState_.prefer64BitMix, "On", "Off") << "\n"
         << "Automation: " << boolLabel(visibleState_.automationEnabled, "Sample-accurate", "Off") << "\n"
         << "PDC: " << boolLabel(visibleState_.pdcEnabled, "On", "Off") << "\n\n"
         << "Sampler / Synth Controls\n"
-        << "  - Gain 0.80\n"
-        << "  - Pan 0.00\n"
-        << "  - Pitch 0 st\n"
-        << "  - Attack 12 ms\n"
-        << "  - Release 180 ms\n"
-        << "  - Filter cutoff 8.4 kHz\n"
-        << "  - Resonance 0.20\n\n"
-        << "This pane represents Channel Settings + Wrapper + automatable parameters.";
+        << "  - Gain " << (channel == nullptr ? 0.80 : channel->gain) << "\n"
+        << "  - Pan " << (channel == nullptr ? 0.00 : channel->pan) << "\n"
+        << "  - Pitch " << (channel == nullptr ? 0.0 : channel->pitchSemitones) << " st\n"
+        << "  - Attack " << (channel == nullptr ? 12.0 : channel->attackMs) << " ms\n"
+        << "  - Release " << (channel == nullptr ? 180.0 : channel->releaseMs) << " ms\n"
+        << "  - Filter cutoff " << (channel == nullptr ? 8400.0 : channel->filterCutoffHz) << " Hz\n"
+        << "  - Resonance " << (channel == nullptr ? 0.20 : channel->resonance) << "\n"
+        << "  - Mixer insert " << (channel == nullptr ? 1 : channel->mixerInsert) << "\n"
+        << "  - Route target " << (channel == nullptr ? 0 : channel->routeTarget) << "\n"
+        << "  - Reverse " << boolLabel(channel != nullptr && channel->reverse, "On", "Off") << "\n"
+        << "  - Stretch " << boolLabel(channel == nullptr || channel->timeStretch, "On", "Off") << "\n\n";
+
+    if (channel != nullptr)
+    {
+        plugin << "Plugin Rack\n";
+        for (const auto& entry : channel->pluginRack)
+        {
+            plugin << "  - " << entry << "\n";
+        }
+        plugin << "\nPresets\n";
+        for (const auto& preset : channel->presets)
+        {
+            plugin << "  - " << preset << "\n";
+        }
+    }
+
+    plugin << "\nThis pane now represents persistent channel settings, plugin rack and routing state.";
     return plugin.str();
 }
 
@@ -2321,28 +2409,92 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
 
 void UI::paintBrowserSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Browser", currentBrowserTabLabel());
+    drawSurfaceFrame(dc, rect, RGB(74, 90, 112));
+
+    int y = rect.top + 30;
+    for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
+    {
+        RECT itemRect{rect.left + 8, y, rect.right - 8, y + 34};
+        HBRUSH rowBrush = CreateSolidBrush(
+            static_cast<int>(index) == workspaceModel_.selectedBrowserIndex ? RGB(56, 68, 84) : RGB(34, 38, 45));
+        FillRect(dc, &itemRect, rowBrush);
+        DeleteObject(rowBrush);
+        y += 38;
+    }
+
+    RECT textRect = rect;
+    textRect.top += 28;
     SetTextColor(dc, RGB(228, 228, 228));
-    DrawTextA(dc, buildBrowserPanelText().c_str(), -1, const_cast<RECT*>(&rect), DT_LEFT | DT_TOP | DT_WORDBREAK);
+    DrawTextA(dc, buildBrowserPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 }
 
 void UI::paintChannelRackSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Channel Rack", "Patterns and channel states");
+    drawSurfaceFrame(dc, rect, RGB(90, 98, 72));
+
+    int y = rect.top + 30;
+    for (std::size_t index = 0; index < workspaceModel_.patternLanes.size(); ++index)
+    {
+        RECT rowRect{rect.left + 8, y, rect.right - 8, y + 26};
+        HBRUSH rowBrush = CreateSolidBrush(index == selectedTrackIndex_ ? RGB(68, 76, 62) : RGB(39, 43, 48));
+        FillRect(dc, &rowRect, rowBrush);
+        DeleteObject(rowBrush);
+        y += 30;
+        if (y > rect.bottom - 28)
+        {
+            break;
+        }
+    }
+
+    RECT textRect = rect;
+    textRect.top += 28;
     SetTextColor(dc, RGB(235, 235, 235));
-    DrawTextA(dc, buildChannelRackPanelText().c_str(), -1, const_cast<RECT*>(&rect), DT_LEFT | DT_TOP | DT_WORDBREAK);
+    DrawTextA(dc, buildChannelRackPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 }
 
 void UI::paintStepSequencerSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Step Sequencer", "Click cells to toggle");
+    drawSurfaceFrame(dc, rect, RGB(108, 88, 42));
+
+    const int top = rect.top + 34;
+    const int left = rect.left + 14;
+    const int cellSize = std::max(16, (rect.right - left - 14) / kStepCount);
+    const int laneCount = std::min(4, static_cast<int>(workspaceModel_.patternLanes.size()));
+
+    for (int laneIndex = 0; laneIndex < laneCount; ++laneIndex)
+    {
+        const PatternLaneState& lane = workspaceModel_.patternLanes[static_cast<std::size_t>(laneIndex)];
+        const int y = top + laneIndex * 24;
+        RECT labelRect{left, y, left + 90, y + 16};
+        SetTextColor(dc, RGB(238, 238, 238));
+        DrawTextA(dc, lane.name.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        for (int step = 0; step < kStepCount; ++step)
+        {
+            RECT cellRect{left + 96 + step * cellSize, y, left + 96 + (step + 1) * cellSize - 4, y + 16};
+            const bool enabled = step < static_cast<int>(lane.steps.size()) && lane.steps[static_cast<std::size_t>(step)].enabled;
+            HBRUSH brush = CreateSolidBrush(enabled ? RGB(235, 155, 49) : RGB(57, 62, 70));
+            FillRect(dc, &cellRect, brush);
+            DeleteObject(brush);
+        }
+    }
+
+    RECT textRect = rect;
+    textRect.top = top + laneCount * 24 + 8;
     SetTextColor(dc, RGB(224, 224, 224));
-    DrawTextA(dc, buildStepSequencerPanelText().c_str(), -1, const_cast<RECT*>(&rect), DT_LEFT | DT_TOP | DT_WORDBREAK);
+    DrawTextA(dc, buildStepSequencerPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 }
 
 void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Piano Roll", "Pattern melody editor");
     RECT drawRect = rect;
+    drawRect.top += 24;
     const int keyWidth = 48;
     const int laneHeight = 22;
-    const int columns = 24;
+    const int columns = kPlaylistCellCount;
     const int gridLeft = drawRect.left + keyWidth;
     const int gridTop = drawRect.top;
 
@@ -2382,6 +2534,10 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
         const auto& note = interactionState_.pianoNoteVisuals[index];
         RECT noteRect{note.rect.x, note.rect.y, note.rect.x + note.rect.width, note.rect.y + note.rect.height};
         FillRect(dc, &noteRect, note.selected ? selectedBrush : noteBrush);
+        RECT handleRect{noteRect.right - 5, noteRect.top, noteRect.right, noteRect.bottom};
+        HBRUSH handleBrush = CreateSolidBrush(RGB(255, 235, 160));
+        FillRect(dc, &handleRect, handleBrush);
+        DeleteObject(handleBrush);
     }
     DeleteObject(noteBrush);
     DeleteObject(selectedBrush);
@@ -2397,16 +2553,21 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
         DeleteObject(marqueePen);
     }
 
+    RECT textRect = drawRect;
+    textRect.left += 8;
+    textRect.top += 8;
     SetTextColor(dc, RGB(235, 235, 235));
-    DrawTextA(dc, buildPianoRollPanelText().c_str(), -1, &drawRect, DT_LEFT | DT_TOP);
+    DrawTextA(dc, buildPianoRollPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP);
+    drawSurfaceFrame(dc, rect, RGB(88, 100, 118));
 }
 
 void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Playlist", workspace_.songMode ? "Song arrangement" : "Pattern preview");
     const int laneHeight = 34;
-    const int timelineHeight = 24;
+    const int timelineHeight = 28;
     const int leftInset = 90;
-    const int columns = 16;
+    const int columns = kPlaylistCellCount;
     const int columnWidth = std::max(28, (rect.right - leftInset) / columns);
 
     HPEN majorPen = CreatePen(PS_SOLID, 1, RGB(74, 84, 98));
@@ -2431,19 +2592,83 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     DeleteObject(majorPen);
     DeleteObject(minorPen);
 
+    for (const auto& marker : workspaceModel_.markers)
+    {
+        const int x = rect.left + leftInset + (marker.timelineCell * columnWidth);
+        HPEN markerPen = CreatePen(PS_SOLID, 1, RGB(255, 207, 84));
+        HGDIOBJ oldPen = SelectObject(dc, markerPen);
+        MoveToEx(dc, x, rect.top, nullptr);
+        LineTo(dc, x, rect.bottom);
+        SelectObject(dc, oldPen);
+        DeleteObject(markerPen);
+
+        RECT markerRect{x + 2, rect.top + 2, x + 70, rect.top + 18};
+        SetTextColor(dc, RGB(255, 222, 128));
+        DrawTextA(dc, marker.name.c_str(), -1, &markerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
     rebuildPlaylistVisuals(rect);
 
     HBRUSH clipBrush = CreateSolidBrush(RGB(94, 170, 255));
     HBRUSH selectedBrush = CreateSolidBrush(RGB(145, 214, 255));
     for (const auto& clip : interactionState_.playlistClipVisuals)
     {
+        if (clip.clipId >= 4000)
+        {
+            continue;
+        }
         RECT clipRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
         FillRect(dc, &clipRect, clip.selected ? selectedBrush : clipBrush);
+        RECT leftHandle{clipRect.left, clipRect.top, clipRect.left + 6, clipRect.bottom};
+        RECT rightHandle{clipRect.right - 6, clipRect.top, clipRect.right, clipRect.bottom};
+        HBRUSH handleBrush = CreateSolidBrush(RGB(220, 240, 255));
+        FillRect(dc, &leftHandle, handleBrush);
+        FillRect(dc, &rightHandle, handleBrush);
+        DeleteObject(handleBrush);
         SetTextColor(dc, RGB(20, 20, 26));
         DrawTextA(dc, ("Clip " + std::to_string(clip.clipId)).c_str(), -1, &clipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     DeleteObject(clipBrush);
     DeleteObject(selectedBrush);
+
+    HBRUSH automationBrush = CreateSolidBrush(RGB(228, 110, 168));
+    HBRUSH automationSelectedBrush = CreateSolidBrush(RGB(255, 160, 205));
+    HPEN automationPen = CreatePen(PS_SOLID, 2, RGB(255, 216, 238));
+    for (const auto& automation : workspaceModel_.automationLanes)
+    {
+        const int clipX = rect.left + leftInset + (automation.startCell * columnWidth);
+        const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
+        RECT automationRect{clipX, clipY, clipX + std::max(42, automation.lengthCells * columnWidth - 6), clipY + laneHeight - 10};
+        FillRect(dc, &automationRect, automation.selected ? automationSelectedBrush : automationBrush);
+        RECT rightHandle{automationRect.right - 6, automationRect.top, automationRect.right, automationRect.bottom};
+        HBRUSH handleBrush = CreateSolidBrush(RGB(255, 232, 243));
+        FillRect(dc, &rightHandle, handleBrush);
+        DeleteObject(handleBrush);
+
+        HGDIOBJ oldPen = SelectObject(dc, automationPen);
+        const int pointCount = static_cast<int>(automation.values.size());
+        for (int point = 0; point < pointCount; ++point)
+        {
+            const int pointX = automationRect.left + ((automationRect.right - automationRect.left - 6) * point) / std::max(1, pointCount - 1) + 3;
+            const int pointY = automationRect.bottom - 4 - ((automationRect.bottom - automationRect.top - 8) * automation.values[static_cast<std::size_t>(point)]) / 100;
+            if (point == 0)
+            {
+                MoveToEx(dc, pointX, pointY, nullptr);
+            }
+            else
+            {
+                LineTo(dc, pointX, pointY);
+            }
+        }
+        SelectObject(dc, oldPen);
+
+        RECT labelRect{automationRect.left + 4, automationRect.top + 2, automationRect.right - 4, automationRect.top + 18};
+        SetTextColor(dc, RGB(40, 22, 34));
+        DrawTextA(dc, automation.target.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    DeleteObject(automationBrush);
+    DeleteObject(automationSelectedBrush);
+    DeleteObject(automationPen);
 
     if (interactionState_.marqueeActive && interactionState_.activeSurface == SurfaceKind::Playlist)
     {
@@ -2458,22 +2683,24 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 
     RECT textRect = rect;
     textRect.left += 6;
-    textRect.top += 4;
+    textRect.top += 30;
     SetTextColor(dc, RGB(235, 235, 235));
     DrawTextA(dc, buildPlaylistPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP);
+    drawSurfaceFrame(dc, rect, RGB(84, 96, 116));
 }
 
 void UI::paintMixerSurface(HDC dc, const RECT& rect)
 {
-    const int stripWidth = 78;
+    drawSurfaceHeader(dc, rect, "Mixer", "Routing, FX and meters");
+    const int stripWidth = 84;
     const int stripGap = 12;
-    const int meterTop = rect.top + 34;
+    const int meterTop = rect.top + 40;
     const int meterBottom = rect.bottom - 18;
     int x = rect.left + 12;
 
-    const int stripCount = static_cast<int>(std::max<std::size_t>(6, visibleState_.project.buses.size() + 2));
-    for (int strip = 0; strip < stripCount; ++strip)
+    for (std::size_t stripIndex = 0; stripIndex < workspaceModel_.mixerStrips.size(); ++stripIndex)
     {
+        const MixerStripState& strip = workspaceModel_.mixerStrips[stripIndex];
         RECT stripRect{x, rect.top + 8, x + stripWidth, rect.bottom - 8};
         HBRUSH stripBrush = CreateSolidBrush(RGB(44, 48, 56));
         FillRect(dc, &stripRect, stripBrush);
@@ -2484,22 +2711,29 @@ void UI::paintMixerSurface(HDC dc, const RECT& rect)
         FillRect(dc, &meterRect, meterBg);
         DeleteObject(meterBg);
 
-        const int fillHeight = ((meterBottom - meterTop) * ((strip % 5) + 3)) / 8;
+        const int fillHeight = ((meterBottom - meterTop) * strip.peakLevel) / 100;
         RECT fillRect{meterRect.left, meterBottom - fillHeight, meterRect.right, meterBottom};
-        HBRUSH fillBrush = CreateSolidBrush(strip == stripCount - 1 ? RGB(239, 178, 52) : RGB(105, 230, 120));
+        HBRUSH fillBrush = CreateSolidBrush(strip.name == "Master" ? RGB(239, 178, 52) : RGB(105, 230, 120));
         FillRect(dc, &fillRect, fillBrush);
         DeleteObject(fillBrush);
 
         RECT titleRect{x + 6, rect.bottom - 28, x + stripWidth - 6, rect.bottom - 8};
         SetTextColor(dc, RGB(232, 232, 232));
-        DrawTextA(dc, (strip == stripCount - 1 ? "Master" : ("Ins " + std::to_string(strip + 1))).c_str(), -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextA(dc, strip.name.c_str(), -1, &titleRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT fxRect{x + 6, rect.top + 10, x + stripWidth - 6, rect.top + 34};
+        std::string fxLabel = strip.effects.empty() ? "Empty" : strip.effects.front();
+        SetTextColor(dc, RGB(170, 180, 192));
+        DrawTextA(dc, fxLabel.c_str(), -1, &fxRect, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
         x += stripWidth + stripGap;
     }
+    drawSurfaceFrame(dc, rect, RGB(94, 104, 118));
 }
 
 void UI::paintPluginSurface(HDC dc, const RECT& rect)
 {
+    drawSurfaceHeader(dc, rect, "Plugin / Channel Settings", "Wrapper and macro controls");
     RECT drawRect = rect;
+    drawRect.top += 24;
     HBRUSH moduleBrush = CreateSolidBrush(RGB(48, 54, 64));
     RECT upper{rect.left + 12, rect.top + 12, rect.right - 12, rect.top + 72};
     FillRect(dc, &upper, moduleBrush);
@@ -2509,6 +2743,7 @@ void UI::paintPluginSurface(HDC dc, const RECT& rect)
 
     SetTextColor(dc, RGB(236, 236, 236));
     DrawTextA(dc, buildPluginPanelText().c_str(), -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    drawSurfaceFrame(dc, rect, RGB(88, 98, 110));
 }
 
 void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
@@ -2516,6 +2751,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     workspace_.focusedPane =
         kind == SurfaceKind::Browser ? WorkspacePane::Browser :
         kind == SurfaceKind::ChannelRack ? WorkspacePane::ChannelRack :
+        kind == SurfaceKind::StepSequencer ? WorkspacePane::ChannelRack :
         kind == SurfaceKind::PianoRoll ? WorkspacePane::PianoRoll :
         kind == SurfaceKind::Playlist ? WorkspacePane::Playlist :
         kind == SurfaceKind::Mixer ? WorkspacePane::Mixer :
@@ -2531,6 +2767,16 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     if (kind == SurfaceKind::Playlist)
     {
         interactionState_.draggingClip = false;
+        interactionState_.resizingClipLeft = false;
+        interactionState_.resizingClipRight = false;
+        interactionState_.editingAutomationPoint = false;
+        interactionState_.selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
+        interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(-1);
+        for (auto& automation : workspaceModel_.automationLanes)
+        {
+            automation.selected = false;
+            automation.selectedPoint = static_cast<std::size_t>(-1);
+        }
         for (auto& clip : interactionState_.playlistClipVisuals)
         {
             const bool hit =
@@ -2540,7 +2786,40 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             if (hit)
             {
                 interactionState_.selectedClipId = clip.clipId;
-                interactionState_.draggingClip = true;
+                const bool leftEdge = x <= (clip.rect.x + 6);
+                const bool rightEdge = x >= (clip.rect.x + clip.rect.width - 6);
+                interactionState_.resizingClipLeft = leftEdge && clip.clipId < 4000;
+                interactionState_.resizingClipRight = rightEdge;
+                interactionState_.draggingClip = !interactionState_.resizingClipLeft && !interactionState_.resizingClipRight;
+                if (clip.clipId >= 4000)
+                {
+                    for (std::size_t automationIndex = 0; automationIndex < workspaceModel_.automationLanes.size(); ++automationIndex)
+                    {
+                        auto& automation = workspaceModel_.automationLanes[automationIndex];
+                        if (automation.clipId == clip.clipId)
+                        {
+                            automation.selected = true;
+                            interactionState_.selectedAutomationLaneIndex = automationIndex;
+                            const int pointCount = static_cast<int>(automation.values.size());
+                            const int width = std::max(1, clip.rect.width - 6);
+                            for (int point = 0; point < pointCount; ++point)
+                            {
+                                const int pointX = clip.rect.x + (width * point) / std::max(1, pointCount - 1) + 3;
+                                const int pointY = clip.rect.y + clip.rect.height - 4 - ((clip.rect.height - 8) * automation.values[static_cast<std::size_t>(point)]) / 100;
+                                if (std::abs(x - pointX) <= 6 && std::abs(y - pointY) <= 6)
+                                {
+                                    interactionState_.editingAutomationPoint = true;
+                                    interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(point);
+                                    automation.selectedPoint = static_cast<std::size_t>(point);
+                                    interactionState_.draggingClip = false;
+                                    interactionState_.resizingClipRight = false;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
         if (!interactionState_.draggingClip)
@@ -2552,6 +2831,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     else if (kind == SurfaceKind::PianoRoll)
     {
         interactionState_.draggingNote = false;
+        interactionState_.resizingNote = false;
         interactionState_.selectedNoteIndex = static_cast<std::size_t>(-1);
         for (std::size_t index = 0; index < interactionState_.pianoNoteVisuals.size(); ++index)
         {
@@ -2562,7 +2842,8 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             note.selected = hit;
             if (hit)
             {
-                interactionState_.draggingNote = true;
+                interactionState_.resizingNote = x >= (note.rect.x + note.rect.width - 6);
+                interactionState_.draggingNote = !interactionState_.resizingNote;
                 interactionState_.selectedNoteIndex = index;
             }
         }
@@ -2575,7 +2856,34 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     else if (kind == SurfaceKind::Browser)
     {
         interactionState_.browserDragActive = true;
-        interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(std::max(0, (y - 28) / 20));
+        const int browserIndex = std::max(0, (y - 30) / 38);
+        interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(browserIndex);
+        workspaceModel_.selectedBrowserIndex =
+            clampValue(browserIndex, 0, std::max(0, static_cast<int>(workspaceModel_.browserEntries.size()) - 1));
+    }
+    else if (kind == SurfaceKind::ChannelRack)
+    {
+        const int laneIndex = clampValue((y - 30) / 30, 0, std::max(0, static_cast<int>(workspaceModel_.patternLanes.size()) - 1));
+        selectedTrackIndex_ = static_cast<std::size_t>(laneIndex);
+        workspaceModel_.activeChannelIndex = laneIndex;
+    }
+    else if (kind == SurfaceKind::StepSequencer && !workspaceModel_.patternLanes.empty())
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int stepWidth = std::max(16, std::max(1, clientRect.right - 110) / kStepCount);
+        const int laneIndex = clampValue((y - 34) / 24, 0, std::max(0, static_cast<int>(workspaceModel_.patternLanes.size()) - 1));
+        const int stepIndex = clampValue((x - 110) / stepWidth, 0, kStepCount - 1);
+        selectedTrackIndex_ = static_cast<std::size_t>(laneIndex);
+        workspaceModel_.activeChannelIndex = laneIndex;
+        auto& lane = workspaceModel_.patternLanes[static_cast<std::size_t>(laneIndex)];
+        if (stepIndex < static_cast<int>(lane.steps.size()))
+        {
+            lane.steps[static_cast<std::size_t>(stepIndex)].enabled = !lane.steps[static_cast<std::size_t>(stepIndex)].enabled;
+            lane.steps[static_cast<std::size_t>(stepIndex)].velocity =
+                lane.steps[static_cast<std::size_t>(stepIndex)].enabled ? 108 : 0;
+            workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)].lanes[static_cast<std::size_t>(laneIndex)] = lane;
+        }
     }
 
     invalidateSurface(hwnd);
@@ -2606,12 +2914,55 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
             }
         }
     }
+    else if (kind == SurfaceKind::Playlist && (interactionState_.resizingClipLeft || interactionState_.resizingClipRight))
+    {
+        for (auto& clip : interactionState_.playlistClipVisuals)
+        {
+            if (clip.clipId != interactionState_.selectedClipId)
+            {
+                continue;
+            }
+
+            if (interactionState_.resizingClipLeft)
+            {
+                const int right = clip.rect.x + clip.rect.width;
+                clip.rect.x = std::min(x, right - 24);
+                clip.rect.width = std::max(24, right - clip.rect.x);
+            }
+            else
+            {
+                clip.rect.width = std::max(24, clip.rect.width + (x - interactionState_.dragStart.x));
+                interactionState_.dragStart.x = x;
+            }
+            break;
+        }
+    }
+    else if (kind == SurfaceKind::Playlist && interactionState_.editingAutomationPoint &&
+             interactionState_.selectedAutomationLaneIndex < workspaceModel_.automationLanes.size() &&
+             interactionState_.selectedAutomationPointIndex < workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex].values.size())
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int laneHeight = 34;
+        const int timelineHeight = 28;
+        auto& automation = workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex];
+        const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
+        const int normalized = clampValue(100 - ((y - clipY) * 100) / std::max(10, laneHeight - 10), 0, 100);
+        automation.values[interactionState_.selectedAutomationPointIndex] = normalized;
+    }
     else if (kind == SurfaceKind::PianoRoll && interactionState_.draggingNote &&
              interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size())
     {
         auto& note = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
         note.rect.x += (x - interactionState_.dragStart.x);
         note.rect.y += (y - interactionState_.dragStart.y);
+        interactionState_.dragStart = POINT{x, y};
+    }
+    else if (kind == SurfaceKind::PianoRoll && interactionState_.resizingNote &&
+             interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size())
+    {
+        auto& note = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
+        note.rect.width = std::max(18, note.rect.width + (x - interactionState_.dragStart.x));
         interactionState_.dragStart = POINT{x, y};
     }
     else if (interactionState_.marqueeActive)
@@ -2627,8 +2978,71 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
 
 void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
 {
-    (void)x;
-    (void)y;
+    if (kind == SurfaceKind::PianoRoll && interactionState_.draggingNote &&
+        interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size() &&
+        !workspaceModel_.patternLanes.empty())
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int keyWidth = 48;
+        const int laneHeight = 22;
+        const int usableWidth = std::max(1, clientRect.right - keyWidth);
+        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+
+        UiNoteVisual& noteVisual = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
+        PianoNoteState& noteState =
+            workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
+                .notes[interactionState_.selectedNoteIndex];
+
+        noteState.step = clampValue((noteVisual.rect.x - keyWidth - 20) / stepWidth, 0, kPlaylistCellCount - 1);
+        const int laneFromTop = (noteVisual.rect.y - 24) / laneHeight;
+        noteState.lane = clampValue((kPianoLaneCount - 1) - laneFromTop, 0, kPianoLaneCount - 1);
+        noteState.selected = true;
+        workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
+            .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
+            .notes[interactionState_.selectedNoteIndex] = noteState;
+    }
+    else if (kind == SurfaceKind::PianoRoll && interactionState_.resizingNote &&
+             interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size() &&
+             !workspaceModel_.patternLanes.empty())
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int keyWidth = 48;
+        const int usableWidth = std::max(1, clientRect.right - keyWidth);
+        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+
+        UiNoteVisual& noteVisual = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
+        PianoNoteState& noteState =
+            workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
+                .notes[interactionState_.selectedNoteIndex];
+        noteState.length = std::max(1, noteVisual.rect.width / std::max(1, stepWidth));
+        workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
+            .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
+            .notes[interactionState_.selectedNoteIndex] = noteState;
+    }
+
+    if (kind == SurfaceKind::PianoRoll && !workspaceModel_.patternLanes.empty() &&
+        !interactionState_.draggingNote && !interactionState_.marqueeActive)
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int keyWidth = 48;
+        const int laneHeight = 22;
+        const int gridTop = 24;
+        const int usableWidth = std::max(1, clientRect.right - keyWidth);
+        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+        if (x > keyWidth && y > gridTop)
+        {
+            const int laneFromTop = (y - gridTop) / laneHeight;
+            const int lane = clampValue((kPianoLaneCount - 1) - laneFromTop, 0, kPianoLaneCount - 1);
+            const int step = clampValue((x - keyWidth) / stepWidth, 0, kPlaylistCellCount - 1);
+            auto& laneState = workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)];
+            laneState.notes.push_back(PianoNoteState{lane, step, 2, 96, false, false, false});
+            workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
+                .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)] = laneState;
+        }
+    }
 
     if (interactionState_.mouseDown && interactionState_.marqueeActive)
     {
@@ -2657,6 +3071,18 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                 RECT overlap{};
                 note.selected = IntersectRect(&overlap, &noteRect, &interactionState_.marqueeRect) != 0;
             }
+            if (workspaceModel_.activeChannelIndex >= 0 &&
+                workspaceModel_.activeChannelIndex < static_cast<int>(workspaceModel_.patternLanes.size()))
+            {
+                auto& notes = workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)].notes;
+                for (std::size_t index = 0; index < notes.size() && index < interactionState_.pianoNoteVisuals.size(); ++index)
+                {
+                    notes[index].selected = interactionState_.pianoNoteVisuals[index].selected;
+                }
+                workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
+                    .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
+                    .notes = notes;
+            }
         }
     }
 
@@ -2667,20 +3093,53 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             interactionState_.playlistClipVisuals.end(),
             [&](const UiClipVisual& clip) { return clip.clipId == interactionState_.selectedClipId; });
 
-        if (clipIt != interactionState_.playlistClipVisuals.end() && !visibleState_.project.tracks.empty())
+        if (clipIt != interactionState_.playlistClipVisuals.end() &&
+            (clipIt->clipId >= 4000 || !visibleState_.project.tracks.empty()))
         {
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
             const int laneHeight = 34;
-            const int timelineHeight = 24;
+            const int timelineHeight = 28;
             const int leftInset = 90;
-            const int targetLane = clampValue((clipIt->rect.y - timelineHeight) / laneHeight, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
-            const double startTime = std::max(0.0, static_cast<double>(clipIt->rect.x - leftInset) / 14.0);
+            const int columnWidth = std::max(28, std::max(1, clientRect.right - leftInset) / kPlaylistCellCount);
+            const int targetLane = std::max(0, (clipIt->rect.y - timelineHeight) / laneHeight);
 
-            AudioEngine::EngineCommand command{};
-            command.type = AudioEngine::CommandType::MoveClip;
-            command.uintValue = clipIt->clipId;
-            command.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(targetLane)].trackId;
-            command.doubleValue = startTime;
-            engine_.postCommand(command);
+            if (clipIt->clipId >= 4000)
+            {
+                for (auto& automation : workspaceModel_.automationLanes)
+                {
+                    if (automation.clipId == clipIt->clipId)
+                    {
+                        automation.lane = targetLane;
+                        automation.startCell = clampValue((clipIt->rect.x - leftInset) / std::max(1, columnWidth), 0, kPlaylistCellCount - 1);
+                        automation.lengthCells = std::max(2, clipIt->rect.width / std::max(1, columnWidth));
+                        automation.selected = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
+                const double startTime = std::max(0.0, static_cast<double>(clipIt->rect.x - leftInset) / 14.0);
+                for (auto& block : workspaceModel_.playlistBlocks)
+                {
+                    if (block.clipId == clipIt->clipId)
+                    {
+                        block.lane = safeLane;
+                        block.startCell = clampValue((clipIt->rect.x - leftInset) / std::max(1, columnWidth), 0, kPlaylistCellCount - 1);
+                        block.lengthCells = std::max(2, clipIt->rect.width / std::max(1, columnWidth));
+                        break;
+                    }
+                }
+
+                AudioEngine::EngineCommand command{};
+                command.type = AudioEngine::CommandType::MoveClip;
+                command.uintValue = clipIt->clipId;
+                command.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(safeLane)].trackId;
+                command.doubleValue = startTime;
+                engine_.postCommand(command);
+            }
         }
     }
 
@@ -2692,7 +3151,9 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         const SurfaceKind targetKind = kindFromSurfaceHandle(targetWindow);
 
         const std::string droppedName =
-            currentBrowserTabLabel() + " Item " + std::to_string(interactionState_.selectedBrowserItemIndex + 1);
+            workspaceModel_.browserEntries.empty()
+                ? (currentBrowserTabLabel() + " Item " + std::to_string(interactionState_.selectedBrowserItemIndex + 1))
+                : workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)].label;
 
         if (targetKind == SurfaceKind::Playlist && visibleState_.selection.selectedTrackId != 0)
         {
@@ -2714,8 +3175,14 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     interactionState_.mouseDown = false;
     interactionState_.draggingClip = false;
     interactionState_.draggingNote = false;
+    interactionState_.resizingClipLeft = false;
+    interactionState_.resizingClipRight = false;
+    interactionState_.resizingNote = false;
+    interactionState_.editingAutomationPoint = false;
     interactionState_.browserDragActive = false;
     interactionState_.marqueeActive = false;
+    interactionState_.selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
+    interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(-1);
     ReleaseCapture();
     invalidateSurface(hwnd);
 }
@@ -2723,29 +3190,45 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
 void UI::rebuildPlaylistVisuals(const RECT& rect)
 {
     interactionState_.playlistClipVisuals.clear();
-    const int timelineHeight = 24;
+    const int timelineHeight = 28;
     const int laneHeight = 34;
     const int leftInset = 90;
-    const int columnWidth = std::max(28, (rect.right - leftInset) / 16);
+    const int columnWidth = std::max(28, (rect.right - leftInset) / kPlaylistCellCount);
 
-    int lane = 0;
-    for (const auto& track : visibleState_.project.tracks)
+    for (const auto& block : workspaceModel_.playlistBlocks)
     {
-        for (const auto& clip : track.clips)
-        {
-            UiClipVisual visual{};
-            visual.clipId = clip.clipId;
-            visual.trackId = track.trackId;
-            visual.rect.x = leftInset + static_cast<int>(clip.startTimeSeconds * 14.0);
-            visual.rect.y = timelineHeight + 6 + (lane * laneHeight);
-            visual.rect.width = std::max(42, static_cast<int>(clip.durationSeconds * 16.0));
-            visual.rect.height = laneHeight - 10;
-            visual.selected = (clip.clipId == interactionState_.selectedClipId);
-            visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
-            visual.rect.width = std::min(visual.rect.width, std::max(30, rect.right - visual.rect.x - 6));
-            interactionState_.playlistClipVisuals.push_back(visual);
-        }
-        ++lane;
+        UiClipVisual visual{};
+        visual.clipId = block.clipId;
+        visual.trackId = block.trackId;
+        visual.rect.x = leftInset + (block.startCell * columnWidth);
+        visual.rect.y = timelineHeight + 6 + (block.lane * laneHeight);
+        visual.rect.width = std::max(42, block.lengthCells * columnWidth - 6);
+        visual.rect.height = laneHeight - 10;
+        visual.selected = block.selected || (block.clipId == interactionState_.selectedClipId);
+        visual.automation = false;
+        visual.resizeLeftHot = false;
+        visual.resizeRightHot = false;
+        visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
+        visual.rect.width = std::min(visual.rect.width, std::max(30, rect.right - visual.rect.x - 6));
+        interactionState_.playlistClipVisuals.push_back(visual);
+    }
+
+    for (const auto& automation : workspaceModel_.automationLanes)
+    {
+        UiClipVisual visual{};
+        visual.clipId = automation.clipId;
+        visual.trackId = 0;
+        visual.rect.x = leftInset + (automation.startCell * columnWidth);
+        visual.rect.y = timelineHeight + 6 + (automation.lane * laneHeight);
+        visual.rect.width = std::max(42, automation.lengthCells * columnWidth - 6);
+        visual.rect.height = laneHeight - 10;
+        visual.selected = automation.selected || (automation.clipId == interactionState_.selectedClipId);
+        visual.automation = true;
+        visual.resizeLeftHot = false;
+        visual.resizeRightHot = false;
+        visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
+        visual.rect.width = std::min(visual.rect.width, std::max(30, rect.right - visual.rect.x - 6));
+        interactionState_.playlistClipVisuals.push_back(visual);
     }
 }
 
@@ -2754,18 +3237,27 @@ void UI::rebuildPianoVisuals(const RECT& rect)
     interactionState_.pianoNoteVisuals.clear();
     const int keyWidth = 48;
     const int laneHeight = 22;
-    const int noteWidth = 54;
+    const int usableWidth = std::max(1, rect.right - keyWidth);
+    const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
 
-    for (int index = 0; index < 7; ++index)
+    if (workspaceModel_.patternLanes.empty())
     {
+        return;
+    }
+
+    const PatternLaneState& lane = workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)];
+    for (std::size_t index = 0; index < lane.notes.size(); ++index)
+    {
+        const PianoNoteState& source = lane.notes[index];
         UiNoteVisual note{};
-        note.lane = index;
-        note.step = index * 2;
-        note.rect.x = keyWidth + 20 + (index * 36);
-        note.rect.y = 30 + ((6 - index) * laneHeight);
-        note.rect.width = noteWidth + ((index % 3) * 10);
+        note.lane = source.lane;
+        note.step = source.step;
+        note.rect.x = keyWidth + 20 + (source.step * stepWidth);
+        note.rect.y = 24 + ((kPianoLaneCount - 1 - source.lane) * laneHeight);
+        note.rect.width = std::max(18, source.length * stepWidth - 4);
         note.rect.height = laneHeight - 4;
-        note.selected = (interactionState_.selectedNoteIndex == static_cast<std::size_t>(index));
+        note.selected = source.selected || (interactionState_.selectedNoteIndex == index);
+        note.resizeRightHot = false;
         note.rect.x = clampValue(note.rect.x, keyWidth + 2, rect.right - 60);
         interactionState_.pianoNoteVisuals.push_back(note);
     }
@@ -2784,3 +3276,358 @@ void UI::setStaticText(HWND control, const std::string& text) const
     }
 }
 
+void UI::syncWorkspaceModel()
+{
+    ensurePatternBank();
+    rebuildPatternLanes();
+    rebuildPlaylistBlocks();
+    rebuildMixerStrips();
+    rebuildChannelSettings();
+    rebuildAutomationLanes();
+    rebuildBrowserEntries();
+
+    if (!workspaceModel_.patterns.empty())
+    {
+        workspaceModel_.selectedPatternIndex =
+            clampValue(workspace_.activePattern - 1, 0, static_cast<int>(workspaceModel_.patterns.size() - 1));
+        workspace_.activePattern = workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)].patternNumber;
+    }
+    else
+    {
+        workspaceModel_.selectedPatternIndex = 0;
+        workspace_.activePattern = 1;
+    }
+
+    if (!workspaceModel_.patternLanes.empty())
+    {
+        workspaceModel_.activeChannelIndex =
+            clampValue(static_cast<int>(selectedTrackIndex_), 0, static_cast<int>(workspaceModel_.patternLanes.size() - 1));
+    }
+    else
+    {
+        workspaceModel_.activeChannelIndex = 0;
+    }
+
+    if (!workspaceModel_.browserEntries.empty())
+    {
+        workspaceModel_.selectedBrowserIndex =
+            clampValue(workspaceModel_.selectedBrowserIndex, 0, static_cast<int>(workspaceModel_.browserEntries.size() - 1));
+    }
+    else
+    {
+        workspaceModel_.selectedBrowserIndex = 0;
+    }
+}
+
+void UI::rebuildBrowserEntries()
+{
+    workspaceModel_.browserEntries.clear();
+
+    auto addEntry = [&](std::string category, std::string label, std::string subtitle, bool favorite = false)
+    {
+        workspaceModel_.browserEntries.push_back(BrowserEntry{std::move(category), std::move(label), std::move(subtitle), favorite});
+    };
+
+    switch (std::min<std::size_t>(workspace_.browserTabIndex, 4))
+    {
+    case 0:
+        addEntry("Packs", "Drums > Punch Kit", "Kick, snare, clap, hats", true);
+        addEntry("Packs", "Loops > Neon House", "128 BPM tonal loops");
+        addEntry("Packs", "Vocals > Hooks", "Chops and one-shots");
+        addEntry("Packs", "FX > Risers", "Transitions and impacts");
+        break;
+    case 1:
+        addEntry("Plugins", "Sampler", "Multi-layer sample channel", true);
+        addEntry("Plugins", "Flex Lead", "Bright synth rack");
+        addEntry("Plugins", "Bass Engine", "Sub and reese presets");
+        addEntry("Effects", "Parametric EQ", "7-band corrective EQ", true);
+        addEntry("Effects", "Compressor", "Glue and punch");
+        addEntry("Effects", "Convolution Reverb", "Space designer");
+        break;
+    case 2:
+        addEntry("Project", "Pattern " + std::to_string(workspace_.activePattern), "Current working pattern", true);
+        addEntry("Project", "Pattern Bank", std::to_string(workspaceModel_.patterns.size()) + " independent patterns");
+        addEntry("Project", "Playlist Arrangement", std::to_string(workspaceModel_.playlistBlocks.size()) + " clips placed");
+        addEntry("Project", "Mixer Presets", std::to_string(workspaceModel_.mixerStrips.size()) + " active inserts");
+        addEntry("Project", "Automation Clips", std::to_string(workspaceModel_.automationLanes.size()) + " lanes linked");
+        break;
+    case 3:
+        addEntry("Automation", "Volume Envelope", "Master ducking macro", true);
+        addEntry("Automation", "Filter Cutoff", "Lead opening sweep");
+        addEntry("Automation", "Pan Motion", "Stereo motion curve");
+        addEntry("Automation", "Gross Macro", "Performance automation");
+        break;
+    default:
+        addEntry("Disk", visibleState_.document.sessionPath.empty() ? "Unsaved Session" : visibleState_.document.sessionPath, "Project root");
+        addEntry("Disk", "Audio Renders", "Bounces and stems");
+        addEntry("Disk", "Recorded Takes", "Playlist recordings");
+        addEntry("Disk", "Presets", "User channel states");
+        break;
+    }
+}
+
+void UI::ensurePatternBank()
+{
+    const std::size_t expectedLaneCount = std::max<std::size_t>(1, visibleState_.project.tracks.empty() ? 1 : visibleState_.project.tracks.size());
+    bool rebuildPatterns = workspaceModel_.patterns.empty();
+
+    if (!rebuildPatterns)
+    {
+        for (const auto& pattern : workspaceModel_.patterns)
+        {
+            if (pattern.lanes.size() != expectedLaneCount)
+            {
+                rebuildPatterns = true;
+                break;
+            }
+        }
+    }
+
+    if (!rebuildPatterns)
+    {
+        return;
+    }
+
+    workspaceModel_.patterns.clear();
+    for (int patternNumber = 1; patternNumber <= 4; ++patternNumber)
+    {
+        workspaceModel_.patterns.push_back(makePatternState(patternNumber));
+    }
+}
+
+void UI::rebuildPatternLanes()
+{
+    workspaceModel_.patternLanes.clear();
+
+    if (workspaceModel_.patterns.empty())
+    {
+        workspaceModel_.patterns.push_back(makePatternState(1));
+    }
+
+    workspaceModel_.selectedPatternIndex =
+        clampValue(workspace_.activePattern - 1, 0, static_cast<int>(workspaceModel_.patterns.size() - 1));
+    workspaceModel_.patternLanes =
+        workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)].lanes;
+}
+
+void UI::rebuildPlaylistBlocks()
+{
+    workspaceModel_.playlistBlocks.clear();
+    workspaceModel_.markers.clear();
+
+    int lane = 0;
+    for (const auto& track : visibleState_.project.tracks)
+    {
+        for (const auto& clip : track.clips)
+        {
+            PlaylistBlockState block{};
+            block.clipId = clip.clipId;
+            block.trackId = track.trackId;
+            block.lane = lane;
+            block.startCell = clampValue(static_cast<int>(clip.startTimeSeconds * 2.0), 0, kPlaylistCellCount - 2);
+            block.lengthCells = std::max(2, static_cast<int>(clip.durationSeconds * 2.0 + 0.5));
+            block.label = clip.name.empty() ? ("Clip " + std::to_string(clip.clipId)) : clip.name;
+            block.clipType = clip.sourceLabel;
+            block.patternNumber = workspace_.activePattern;
+            block.muted = clip.muted;
+            block.selected = (clip.clipId == interactionState_.selectedClipId);
+            workspaceModel_.playlistBlocks.push_back(std::move(block));
+        }
+        ++lane;
+    }
+
+    if (workspaceModel_.playlistBlocks.empty())
+    {
+        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{1, 0, 0, 0, 4, "Pattern 1 Intro", "Pattern", 1, false, false});
+        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{2, 0, 1, 4, 6, "Pattern 2 Bass", "Pattern", 2, false, false});
+        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{3, 0, 2, 10, 8, "Vocal Chop", "Audio", 0, false, false});
+        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{4, 0, 0, 18, 6, "Pattern 3 Fill", "Pattern", 3, false, false});
+    }
+
+    workspaceModel_.markers = {
+        {"Intro", 0},
+        {"Drop", 8},
+        {"Break", 16},
+        {"Outro", 24}};
+}
+
+void UI::rebuildMixerStrips()
+{
+    workspaceModel_.mixerStrips.clear();
+
+    int insertSlot = 1;
+    for (const auto& bus : visibleState_.project.buses)
+    {
+        MixerStripState strip{};
+        strip.busId = bus.busId;
+        strip.name = bus.name;
+        strip.insertSlot = insertSlot;
+        strip.volumeDb = -4.5 + static_cast<double>(insertSlot % 5);
+        strip.pan = (insertSlot % 3 == 0) ? -0.12 : ((insertSlot % 4 == 0) ? 0.15 : 0.0);
+        strip.peakLevel = normalizedMeterFill(strip.volumeDb);
+        strip.routeTarget = (insertSlot % 3 == 0) ? 0 : -1;
+        strip.sendAmount = 0.12 * static_cast<double>(insertSlot % 4);
+        strip.effects = {"EQ", "Comp", insertSlot % 2 == 0 ? "Saturator" : "Delay"};
+        workspaceModel_.mixerStrips.push_back(std::move(strip));
+        ++insertSlot;
+    }
+
+    if (workspaceModel_.mixerStrips.empty())
+    {
+        workspaceModel_.mixerStrips.push_back(MixerStripState{1, "Kick Bus", 1, -3.0, 0.0, 78, false, false, -1, 0.10, {"EQ", "Clipper"}});
+        workspaceModel_.mixerStrips.push_back(MixerStripState{2, "Music Bus", 2, -4.5, -0.08, 66, false, false, 0, 0.26, {"EQ", "Compressor", "Stereo"}});
+    }
+
+    workspaceModel_.mixerStrips.push_back(MixerStripState{0, "Master", 0, -1.2, 0.0, 92, false, false, -1, 0.0, {"Glue", "Limiter"}});
+}
+
+void UI::rebuildChannelSettings()
+{
+    workspaceModel_.channelSettings.clear();
+
+    std::size_t laneIndex = 0;
+    for (const auto& lane : workspaceModel_.patternLanes)
+    {
+        ChannelSettingsState settings{};
+        settings.trackId = lane.trackId;
+        settings.name = lane.name;
+        settings.gain = 0.72 + (static_cast<double>(laneIndex % 4) * 0.08);
+        settings.pan = (laneIndex % 3 == 0) ? -0.12 : ((laneIndex % 4 == 0) ? 0.16 : 0.0);
+        settings.pitchSemitones = static_cast<double>((static_cast<int>(laneIndex) % 5) - 2);
+        settings.attackMs = 8.0 + static_cast<double>(laneIndex * 3);
+        settings.releaseMs = 150.0 + static_cast<double>(laneIndex * 24);
+        settings.filterCutoffHz = 6200.0 + static_cast<double>(laneIndex * 850);
+        settings.resonance = 0.18 + static_cast<double>(laneIndex) * 0.03;
+        settings.mixerInsert = static_cast<int>(laneIndex + 1);
+        settings.routeTarget = (laneIndex % 2 == 0) ? 0 : -1;
+        settings.reverse = (laneIndex % 5 == 0);
+        settings.timeStretch = true;
+        settings.pluginRack = {
+            laneIndex % 2 == 0 ? "Sampler" : "Synth Rack",
+            "Parametric EQ",
+            laneIndex % 3 == 0 ? "Soft Clipper" : "Compressor"};
+        settings.presets = {
+            lane.name + " Init",
+            lane.name + " Bright",
+            lane.name + " Wide"};
+        workspaceModel_.channelSettings.push_back(std::move(settings));
+        ++laneIndex;
+    }
+
+    if (workspaceModel_.channelSettings.empty())
+    {
+        workspaceModel_.channelSettings.push_back(ChannelSettingsState{0, "Init Sampler", 0.8, 0.0, 0.0, 12.0, 180.0, 8400.0, 0.2, 1, 0, false, true, {"Sampler", "EQ"}, {"Init", "Bright", "Wide"}});
+    }
+}
+
+void UI::rebuildAutomationLanes()
+{
+    workspaceModel_.automationLanes.clear();
+    const int automationLaneBase = static_cast<int>(workspaceModel_.patternLanes.size());
+    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Master Volume", {85, 78, 80, 92, 88, 74, 96, 83}, 4001, automationLaneBase + 0, 0, 8, false});
+    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Lead Filter", {24, 28, 36, 48, 58, 72, 81, 94}, 4002, automationLaneBase + 1, 8, 8, false});
+    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Delay Send", {8, 12, 18, 12, 22, 14, 26, 18}, 4003, automationLaneBase + 2, 18, 6, false});
+}
+
+UI::PatternState UI::makePatternState(int patternNumber) const
+{
+    PatternState pattern{};
+    pattern.patternNumber = patternNumber;
+    pattern.name = "Pattern " + std::to_string(patternNumber);
+    pattern.lengthInBars = 2 + ((patternNumber - 1) % 3);
+    pattern.accentAmount = 8 * patternNumber;
+
+    std::size_t laneIndex = 0;
+    for (const auto& track : visibleState_.project.tracks)
+    {
+        PatternLaneState lane{};
+        lane.trackId = track.trackId;
+        lane.name = track.name;
+        lane.steps.resize(kStepCount);
+        for (int step = 0; step < kStepCount; ++step)
+        {
+            const int patternOffset = patternNumber - 1;
+            const bool onQuarter = ((step + patternOffset) % 4 == 0);
+            const bool grooveHit = ((step + static_cast<int>(laneIndex) + patternOffset) % (patternNumber + 3) == 0);
+            lane.steps[static_cast<std::size_t>(step)].enabled = onQuarter || grooveHit;
+            lane.steps[static_cast<std::size_t>(step)].velocity =
+                68 + ((step * (patternNumber + 6) + static_cast<int>(laneIndex) * 11) % 56);
+        }
+        lane.swing = static_cast<int>((laneIndex * 9 + patternNumber * 5) % 48);
+        lane.shuffle = static_cast<int>((laneIndex * 5 + patternNumber * 7) % 32);
+        ensurePatternLaneNoteContent(lane, laneIndex + static_cast<std::size_t>(patternNumber - 1));
+        pattern.lanes.push_back(std::move(lane));
+        ++laneIndex;
+    }
+
+    if (pattern.lanes.empty())
+    {
+        PatternLaneState lane{};
+        lane.name = "Init Sampler";
+        lane.steps.resize(kStepCount);
+        for (int step = 0; step < kStepCount; ++step)
+        {
+            lane.steps[static_cast<std::size_t>(step)].enabled = ((step + patternNumber - 1) % 4 == 0);
+            lane.steps[static_cast<std::size_t>(step)].velocity = 88 + (patternNumber * 2);
+        }
+        ensurePatternLaneNoteContent(lane, static_cast<std::size_t>(patternNumber - 1));
+        pattern.lanes.push_back(std::move(lane));
+    }
+
+    return pattern;
+}
+
+void UI::ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex)
+{
+    if (!lane.notes.empty())
+    {
+        return;
+    }
+
+    const int rootLane = 12 + static_cast<int>((laneIndex * 3) % 7);
+    lane.notes.push_back(PianoNoteState{rootLane, 0, 3, 98, true, false, false});
+    lane.notes.push_back(PianoNoteState{rootLane + 4, 4, 2, 84, false, false, false});
+    lane.notes.push_back(PianoNoteState{rootLane + 7, 8, 4, 102, false, false, false});
+    lane.notes.push_back(PianoNoteState{rootLane + 12, 14, 2, 92, false, (laneIndex % 2) == 0, false});
+}
+
+void UI::drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const
+{
+    RECT headerRect{rect.left, rect.top, rect.right, rect.top + 22};
+    HBRUSH headerBrush = CreateSolidBrush(RGB(36, 40, 48));
+    FillRect(dc, &headerRect, headerBrush);
+    DeleteObject(headerBrush);
+
+    RECT titleRect{rect.left + 8, rect.top + 3, rect.right - 8, rect.top + 20};
+    SetTextColor(dc, RGB(244, 244, 244));
+    DrawTextA(dc, title.c_str(), -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    if (!subtitle.empty())
+    {
+        RECT subtitleRect{rect.right - 240, rect.top + 3, rect.right - 8, rect.top + 20};
+        SetTextColor(dc, RGB(170, 178, 190));
+        DrawTextA(dc, subtitle.c_str(), -1, &subtitleRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+void UI::drawSurfaceFrame(HDC dc, const RECT& rect, COLORREF borderColor) const
+{
+    HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
+std::string UI::browserDropTargetLabel() const
+{
+    if (workspaceModel_.browserEntries.empty())
+    {
+        return "Rack / Playlist / Mixer";
+    }
+
+    const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
+    return entry.label + " -> Rack / Playlist / Mixer";
+}
