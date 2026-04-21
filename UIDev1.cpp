@@ -908,7 +908,6 @@ void UI::layoutControls()
     }
 
     const int timePanelX = 22;
-    const int timePanelY = topPanelY + 12;
     const int timePanelWidth = 210;
     const int spectrumPanelX = timePanelX + timePanelWidth + 14;
     const int spectrumPanelWidth = 140;
@@ -2141,4 +2140,5 @@ void UI::handleCommand(WORD commandId)
     layoutControls();
     refreshFromEngineSnapshot();
 }
+
 
