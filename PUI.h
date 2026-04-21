@@ -15,6 +15,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -96,6 +97,8 @@ public:
 
         int sampleRate = 0;
         int blockSize = 0;
+        double timelineSeconds = 0.0;
+        std::uint64_t transportSamplePosition = 0;
 
         std::uint64_t xruns = 0;
         std::uint64_t deadlineMisses = 0;
@@ -274,6 +277,9 @@ public:
         std::string label;
         std::string subtitle;
         bool favorite = false;
+        int indentLevel = 0;
+        bool group = false;
+        bool expanded = false;
     };
 
     struct ChannelStepState
@@ -456,6 +462,7 @@ private:
     void requestLoadProject();
     void requestCreatePluginStub();
     void requestTogglePluginSandboxMode();
+    void showMainMenuPopup(WORD commandId);
 
     void handleCommand(WORD commandId);
     void handlePluginManagerCommand(WORD commandId);
@@ -508,6 +515,10 @@ private:
     void rebuildAutomationLanes();
     PatternState makePatternState(int patternNumber) const;
     void ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex) const;
+    void paintMainBackground(HDC dc) const;
+    HBRUSH resolveLabelBrush(HWND control, HDC dc) const;
+    bool drawThemedButton(const DRAWITEMSTRUCT& drawItem) const;
+    bool isControlActive(WORD controlId) const;
     void drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const;
     void drawSurfaceFrame(HDC dc, const RECT& rect, COLORREF borderColor) const;
     std::string browserDropTargetLabel() const;
@@ -585,6 +596,14 @@ private:
         IdButtonPluginAddStub = 1048,
         IdButtonPluginToggleSandbox = 1049,
         IdButtonPluginClose = 1050,
+        IdButtonMenuFile = 1051,
+        IdButtonMenuEdit = 1052,
+        IdButtonMenuAdd = 1053,
+        IdButtonMenuPatterns = 1054,
+        IdButtonMenuView = 1055,
+        IdButtonMenuOptions = 1056,
+        IdButtonMenuTools = 1057,
+        IdButtonMenuHelp = 1058,
 
         IdCheckboxAutomation = 1101,
         IdCheckboxPdc = 1102,
@@ -656,6 +675,15 @@ private:
 
     HWND hwnd_ = nullptr;
     HMENU mainMenu_ = nullptr;
+    HMENU fileMenu_ = nullptr;
+    HMENU editMenu_ = nullptr;
+    HMENU addMenu_ = nullptr;
+    HMENU patternsMenu_ = nullptr;
+    HMENU viewMenu_ = nullptr;
+    HMENU optionsMenu_ = nullptr;
+    HMENU toolsMenu_ = nullptr;
+    HMENU helpMenu_ = nullptr;
+    std::array<HWND, 8> mainMenuButtons_{};
 
     HWND engineStartButton_ = nullptr;
     HWND engineStopButton_ = nullptr;
@@ -752,6 +780,7 @@ private:
     WorkspaceModel workspaceModel_{};
     std::size_t selectedTrackIndex_ = 0;
 };
+
 
 
 
