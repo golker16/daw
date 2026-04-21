@@ -101,6 +101,7 @@ public:
     enum class CommandType
     {
         None,
+        NewProject,
         StartEngine,
         StopEngine,
         RecoverAudioDevice,
@@ -715,6 +716,7 @@ public:
     bool addTrack(const std::string& name);
     bool addBus(const std::string& name);
     bool addClipToTrack(std::uint32_t trackId, const std::string& clipName);
+    bool newProject(const std::string& name);
     bool saveProject(const std::string& path);
     bool loadProject(const std::string& path);
     bool undoLastEdit();
