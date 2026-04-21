@@ -3622,15 +3622,18 @@ void AudioEngine::processPendingCommands()
 
         case CommandType::ToggleAnticipativeProcessing:
             config_.enableAnticipativeProcessing = !config_.enableAnticipativeProcessing;
+            publishSnapshot();
             break;
 
         case CommandType::ToggleAutomation:
             config_.enableSampleAccurateAutomation = !config_.enableSampleAccurateAutomation;
+            publishSnapshot();
             break;
 
         case CommandType::TogglePdc:
             config_.enablePdc = !config_.enablePdc;
             recalculateLatencyModel();
+            publishSnapshot();
             break;
 
         case CommandType::RenderOffline:
