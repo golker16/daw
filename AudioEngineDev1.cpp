@@ -137,6 +137,12 @@ namespace
         return std::clamp(value, -1.0, 1.0);
     }
 
+    double sanitizeTempoBpm(double bpm)
+    {
+        const double clamped = std::clamp(bpm, 10.0, 522.0);
+        return std::round(clamped * 1000.0) / 1000.0;
+    }
+
     const char* toString(AudioEngine::EngineState state)
     {
         switch (state)
@@ -730,6 +736,9 @@ bool AudioEngine::initializeTransport()
     transportInfo_.tempoBpm = 120.0;
     transportInfo_.timelineSeconds = 0.0;
     transportInfo_.samplePosition = 0;
+    transportInfo_.loopEnabled = false;
+    transportInfo_.loopStartSample = 0;
+    transportInfo_.loopEndSample = 0;
     transportInfo_.monitoringEnabled = true;
     publishSnapshot();
     return true;
@@ -765,7 +774,7 @@ void AudioEngine::setTimelinePosition(double seconds)
 
 void AudioEngine::setTempo(double bpm)
 {
-    transportInfo_.tempoBpm = std::max(1.0, bpm);
+    transportInfo_.tempoBpm = sanitizeTempoBpm(bpm);
     publishSnapshot();
 }
 
@@ -774,6 +783,28 @@ void AudioEngine::setSamplePosition(std::uint64_t samplePosition)
     transportInfo_.samplePosition = samplePosition;
     transportInfo_.timelineSeconds =
         static_cast<double>(samplePosition) / static_cast<double>(std::max(1u, deviceState_.sampleRate));
+    publishSnapshot();
+}
+
+void AudioEngine::configureTransportLoop(std::uint64_t startSample, std::uint64_t endSample, bool enabled)
+{
+    transportInfo_.loopStartSample = startSample;
+    transportInfo_.loopEndSample = endSample > startSample ? endSample : startSample;
+    transportInfo_.loopEnabled =
+        enabled && transportInfo_.loopEndSample > transportInfo_.loopStartSample;
+
+    if (transportInfo_.loopEnabled && transportInfo_.samplePosition >= transportInfo_.loopEndSample)
+    {
+        const std::uint64_t loopLength = transportInfo_.loopEndSample - transportInfo_.loopStartSample;
+        const std::uint64_t offset = loopLength == 0
+            ? 0
+            : ((transportInfo_.samplePosition - transportInfo_.loopStartSample) % loopLength);
+        transportInfo_.samplePosition = transportInfo_.loopStartSample + offset;
+        transportInfo_.timelineSeconds =
+            static_cast<double>(transportInfo_.samplePosition) /
+            static_cast<double>(std::max(1u, deviceState_.sampleRate));
+    }
+
     publishSnapshot();
 }
 
@@ -2739,6 +2770,18 @@ void AudioEngine::audioThreadMain()
         if (transportInfo_.state == TransportState::Playing)
         {
             transportInfo_.samplePosition += framesToRender;
+
+            if (transportInfo_.loopEnabled && transportInfo_.loopEndSample > transportInfo_.loopStartSample)
+            {
+                const std::uint64_t loopLength = transportInfo_.loopEndSample - transportInfo_.loopStartSample;
+                if (transportInfo_.samplePosition >= transportInfo_.loopEndSample && loopLength > 0)
+                {
+                    const std::uint64_t wrappedOffset =
+                        (transportInfo_.samplePosition - transportInfo_.loopStartSample) % loopLength;
+                    transportInfo_.samplePosition = transportInfo_.loopStartSample + wrappedOffset;
+                }
+            }
+
             transportInfo_.timelineSeconds =
                 static_cast<double>(transportInfo_.samplePosition) /
                 static_cast<double>(std::max(1u, deviceState_.sampleRate));
@@ -3620,6 +3663,10 @@ void AudioEngine::processPendingCommands()
             setSamplePosition(command.uintValue);
             break;
 
+        case CommandType::ConfigureTransportLoop:
+            configureTransportLoop(command.uintValue, command.secondaryUintValue, command.boolValue);
+            break;
+
         case CommandType::ToggleAnticipativeProcessing:
             config_.enableAnticipativeProcessing = !config_.enableAnticipativeProcessing;
             publishSnapshot();
@@ -3692,3 +3739,4 @@ void AudioEngine::processPendingCommands()
         }
     }
 }
+
