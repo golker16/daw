@@ -20,9 +20,10 @@
 #if defined(DAW_ENABLE_WASAPI) && (DAW_ENABLE_WASAPI == 1)
 #include <Audioclient.h>
 #include <avrt.h>
-#include <Functiondiscoverykeys_devpkey.h>
 #include <mmdeviceapi.h>
+#include <propkeydef.h>
 #include <propsys.h>
+#include <Functiondiscoverykeys_devpkey.h>
 #endif
 
 namespace
@@ -3531,3 +3532,4 @@ void AudioEngine::processPendingCommands()
         }
     }
 }
+
