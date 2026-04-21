@@ -2461,7 +2461,8 @@ void UI::paintStepSequencerSurface(HDC dc, const RECT& rect)
 
     const int top = rect.top + 34;
     const int left = rect.left + 14;
-    const int cellSize = std::max(16, (rect.right - left - 14) / kStepCount);
+    const int availableWidth = static_cast<int>(rect.right) - left - 14;
+    const int cellSize = std::max<int>(16, availableWidth / kStepCount);
     const int laneCount = std::min(4, static_cast<int>(workspaceModel_.patternLanes.size()));
 
     for (int laneIndex = 0; laneIndex < laneCount; ++laneIndex)
@@ -2516,7 +2517,8 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
 
     for (int col = 0; col <= columns; ++col)
     {
-        const int x = gridLeft + (col * std::max(18, (drawRect.right - gridLeft) / columns));
+        const int gridWidth = static_cast<int>(drawRect.right) - gridLeft;
+        const int x = gridLeft + (col * std::max<int>(18, gridWidth / columns));
         SelectObject(dc, (col % 4 == 0) ? majorPen : minorPen);
         MoveToEx(dc, x, drawRect.top, nullptr);
         LineTo(dc, x, drawRect.bottom);
@@ -2568,7 +2570,8 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     const int timelineHeight = 28;
     const int leftInset = 90;
     const int columns = kPlaylistCellCount;
-    const int columnWidth = std::max(28, (rect.right - leftInset) / columns);
+    const int playlistWidth = static_cast<int>(rect.right) - leftInset;
+    const int columnWidth = std::max<int>(28, playlistWidth / columns);
 
     HPEN majorPen = CreatePen(PS_SOLID, 1, RGB(74, 84, 98));
     HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(48, 54, 64));
@@ -2871,7 +2874,8 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int stepWidth = std::max(16, std::max(1, clientRect.right - 110) / kStepCount);
+        const int clientWidth = static_cast<int>(clientRect.right);
+        const int stepWidth = std::max<int>(16, std::max<int>(1, clientWidth - 110) / kStepCount);
         const int laneIndex = clampValue((y - 34) / 24, 0, std::max(0, static_cast<int>(workspaceModel_.patternLanes.size()) - 1));
         const int stepIndex = clampValue((x - 110) / stepWidth, 0, kStepCount - 1);
         selectedTrackIndex_ = static_cast<std::size_t>(laneIndex);
@@ -2927,11 +2931,11 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
             {
                 const int right = clip.rect.x + clip.rect.width;
                 clip.rect.x = std::min(x, right - 24);
-                clip.rect.width = std::max(24, right - clip.rect.x);
+                clip.rect.width = std::max<int>(24, right - clip.rect.x);
             }
             else
             {
-                clip.rect.width = std::max(24, clip.rect.width + (x - interactionState_.dragStart.x));
+                clip.rect.width = std::max<int>(24, clip.rect.width + (x - static_cast<int>(interactionState_.dragStart.x)));
                 interactionState_.dragStart.x = x;
             }
             break;
@@ -2947,7 +2951,7 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
         const int timelineHeight = 28;
         auto& automation = workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex];
         const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
-        const int normalized = clampValue(100 - ((y - clipY) * 100) / std::max(10, laneHeight - 10), 0, 100);
+        const int normalized = clampValue(100 - ((y - clipY) * 100) / std::max<int>(10, laneHeight - 10), 0, 100);
         automation.values[interactionState_.selectedAutomationPointIndex] = normalized;
     }
     else if (kind == SurfaceKind::PianoRoll && interactionState_.draggingNote &&
@@ -2962,15 +2966,15 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
              interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size())
     {
         auto& note = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
-        note.rect.width = std::max(18, note.rect.width + (x - interactionState_.dragStart.x));
+        note.rect.width = std::max<int>(18, note.rect.width + (x - static_cast<int>(interactionState_.dragStart.x)));
         interactionState_.dragStart = POINT{x, y};
     }
     else if (interactionState_.marqueeActive)
     {
-        interactionState_.marqueeRect.left = std::min(interactionState_.dragStart.x, x);
-        interactionState_.marqueeRect.top = std::min(interactionState_.dragStart.y, y);
-        interactionState_.marqueeRect.right = std::max(interactionState_.dragStart.x, x);
-        interactionState_.marqueeRect.bottom = std::max(interactionState_.dragStart.y, y);
+        interactionState_.marqueeRect.left = std::min<int>(static_cast<int>(interactionState_.dragStart.x), x);
+        interactionState_.marqueeRect.top = std::min<int>(static_cast<int>(interactionState_.dragStart.y), y);
+        interactionState_.marqueeRect.right = std::max<int>(static_cast<int>(interactionState_.dragStart.x), x);
+        interactionState_.marqueeRect.bottom = std::max<int>(static_cast<int>(interactionState_.dragStart.y), y);
     }
 
     invalidateSurface(hwnd);
@@ -2986,8 +2990,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         GetClientRect(hwnd, &clientRect);
         const int keyWidth = 48;
         const int laneHeight = 22;
-        const int usableWidth = std::max(1, clientRect.right - keyWidth);
-        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+        const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
+        const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
 
         UiNoteVisual& noteVisual = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
         PianoNoteState& noteState =
@@ -3009,14 +3013,14 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
         const int keyWidth = 48;
-        const int usableWidth = std::max(1, clientRect.right - keyWidth);
-        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+        const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
+        const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
 
         UiNoteVisual& noteVisual = interactionState_.pianoNoteVisuals[interactionState_.selectedNoteIndex];
         PianoNoteState& noteState =
             workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
                 .notes[interactionState_.selectedNoteIndex];
-        noteState.length = std::max(1, noteVisual.rect.width / std::max(1, stepWidth));
+        noteState.length = std::max<int>(1, noteVisual.rect.width / std::max<int>(1, stepWidth));
         workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
             .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
             .notes[interactionState_.selectedNoteIndex] = noteState;
@@ -3030,8 +3034,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         const int keyWidth = 48;
         const int laneHeight = 22;
         const int gridTop = 24;
-        const int usableWidth = std::max(1, clientRect.right - keyWidth);
-        const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+        const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
+        const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
         if (x > keyWidth && y > gridTop)
         {
             const int laneFromTop = (y - gridTop) / laneHeight;
@@ -3101,8 +3105,9 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             const int laneHeight = 34;
             const int timelineHeight = 28;
             const int leftInset = 90;
-            const int columnWidth = std::max(28, std::max(1, clientRect.right - leftInset) / kPlaylistCellCount);
-            const int targetLane = std::max(0, (clipIt->rect.y - timelineHeight) / laneHeight);
+            const int clientWidth = static_cast<int>(clientRect.right);
+            const int columnWidth = std::max<int>(28, std::max<int>(1, clientWidth - leftInset) / kPlaylistCellCount);
+            const int targetLane = std::max<int>(0, (clipIt->rect.y - timelineHeight) / laneHeight);
 
             if (clipIt->clipId >= 4000)
             {
@@ -3111,8 +3116,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                     if (automation.clipId == clipIt->clipId)
                     {
                         automation.lane = targetLane;
-                        automation.startCell = clampValue((clipIt->rect.x - leftInset) / std::max(1, columnWidth), 0, kPlaylistCellCount - 1);
-                        automation.lengthCells = std::max(2, clipIt->rect.width / std::max(1, columnWidth));
+                        automation.startCell = clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
+                        automation.lengthCells = std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
                         automation.selected = true;
                         break;
                     }
@@ -3127,8 +3132,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                     if (block.clipId == clipIt->clipId)
                     {
                         block.lane = safeLane;
-                        block.startCell = clampValue((clipIt->rect.x - leftInset) / std::max(1, columnWidth), 0, kPlaylistCellCount - 1);
-                        block.lengthCells = std::max(2, clipIt->rect.width / std::max(1, columnWidth));
+                        block.startCell = clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
+                        block.lengthCells = std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
                         break;
                     }
                 }
@@ -3193,7 +3198,7 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
     const int timelineHeight = 28;
     const int laneHeight = 34;
     const int leftInset = 90;
-    const int columnWidth = std::max(28, (rect.right - leftInset) / kPlaylistCellCount);
+    const int columnWidth = std::max<int>(28, (static_cast<int>(rect.right) - leftInset) / kPlaylistCellCount);
 
     for (const auto& block : workspaceModel_.playlistBlocks)
     {
@@ -3209,7 +3214,7 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
         visual.resizeLeftHot = false;
         visual.resizeRightHot = false;
         visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
-        visual.rect.width = std::min(visual.rect.width, std::max(30, rect.right - visual.rect.x - 6));
+        visual.rect.width = std::min<int>(visual.rect.width, std::max<int>(30, static_cast<int>(rect.right) - visual.rect.x - 6));
         interactionState_.playlistClipVisuals.push_back(visual);
     }
 
@@ -3227,7 +3232,7 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
         visual.resizeLeftHot = false;
         visual.resizeRightHot = false;
         visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
-        visual.rect.width = std::min(visual.rect.width, std::max(30, rect.right - visual.rect.x - 6));
+        visual.rect.width = std::min<int>(visual.rect.width, std::max<int>(30, static_cast<int>(rect.right) - visual.rect.x - 6));
         interactionState_.playlistClipVisuals.push_back(visual);
     }
 }
@@ -3237,8 +3242,8 @@ void UI::rebuildPianoVisuals(const RECT& rect)
     interactionState_.pianoNoteVisuals.clear();
     const int keyWidth = 48;
     const int laneHeight = 22;
-    const int usableWidth = std::max(1, rect.right - keyWidth);
-    const int stepWidth = std::max(18, usableWidth / kPlaylistCellCount);
+    const int usableWidth = std::max<int>(1, static_cast<int>(rect.right) - keyWidth);
+    const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
 
     if (workspaceModel_.patternLanes.empty())
     {
@@ -3577,7 +3582,7 @@ UI::PatternState UI::makePatternState(int patternNumber) const
     return pattern;
 }
 
-void UI::ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex)
+void UI::ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex) const
 {
     if (!lane.notes.empty())
     {
@@ -3631,3 +3636,4 @@ std::string UI::browserDropTargetLabel() const
     const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
     return entry.label + " -> Rack / Playlist / Mixer";
 }
+
