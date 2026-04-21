@@ -259,6 +259,7 @@ public:
         bool mixerVisible = true;
         bool pluginVisible = true;
         bool songMode = true;
+        bool chronometerEnabled = true;
         bool recordArmed = false;
         int activePattern = 1;
         double tempoBpm = 120.0;
@@ -408,6 +409,8 @@ private:
     static LRESULT CALLBACK PluginManagerProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK DetachedPaneProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK TempoControlProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK TempoEditProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     void registerWindowClass();
     void createMainWindow();
@@ -463,6 +466,16 @@ private:
     void requestCreatePluginStub();
     void requestTogglePluginSandboxMode();
     void showMainMenuPopup(WORD commandId);
+    void toggleChronometer();
+    void syncTransportLoopState();
+    double getPatternPlaybackLengthSeconds() const;
+    double getSongPlaybackLengthSeconds() const;
+    double getPlaybackProgressNormalized() const;
+    bool isTempoFineTuneHit(HWND hwnd, int x) const;
+    void applyTempoStep(bool fineAdjust, double delta);
+    void beginTempoInlineEdit();
+    void endTempoInlineEdit(bool applyChanges);
+    void showTempoContextMenu(POINT screenPoint);
 
     void handleCommand(WORD commandId);
     void handlePluginManagerCommand(WORD commandId);
@@ -542,7 +555,7 @@ private:
     static constexpr const char* kDetachedPaneClassName = "DAWCloudDetachedPaneClass";
     static constexpr const char* kWindowTitleBase = "DAW Cloud Template";
     static constexpr UINT_PTR kUiTimerId = 1;
-    static constexpr UINT kUiTimerIntervalMs = 250;
+    static constexpr UINT kUiTimerIntervalMs = 50;
 
     enum ControlId : WORD
     {
@@ -604,6 +617,8 @@ private:
         IdButtonMenuOptions = 1056,
         IdButtonMenuTools = 1057,
         IdButtonMenuHelp = 1058,
+        IdButtonTempoDisplay = 1059,
+        IdButtonChronometer = 1060,
 
         IdCheckboxAutomation = 1101,
         IdCheckboxPdc = 1102,
@@ -691,6 +706,7 @@ private:
     HWND stopTransportButton_ = nullptr;
     HWND recordButton_ = nullptr;
     HWND patSongButton_ = nullptr;
+    HWND chronoButton_ = nullptr;
     HWND tempoDownButton_ = nullptr;
     HWND tempoUpButton_ = nullptr;
     HWND patternPrevButton_ = nullptr;
@@ -760,6 +776,7 @@ private:
     HWND pluginHeaderLabel_ = nullptr;
     HWND pluginPanel_ = nullptr;
     HWND contextLabel_ = nullptr;
+    HWND tempoEditHwnd_ = nullptr;
 
     HWND pluginManagerHwnd_ = nullptr;
     HWND pluginManagerHeaderLabel_ = nullptr;
@@ -779,6 +796,18 @@ private:
     WorkspaceState workspace_{};
     WorkspaceModel workspaceModel_{};
     std::size_t selectedTrackIndex_ = 0;
+    WNDPROC tempoControlProc_ = nullptr;
+    WNDPROC tempoEditProc_ = nullptr;
+    bool tempoDragActive_ = false;
+    bool tempoDragFineAdjust_ = false;
+    bool tempoDragMoved_ = false;
+    POINT tempoDragOrigin_{};
+    double tempoDragStartBpm_ = 120.0;
+    double tempoDragLastAppliedBpm_ = 120.0;
+    bool transportLoopStateInitialized_ = false;
+    bool syncedLoopEnabled_ = false;
+    std::uint64_t syncedLoopStartSample_ = 0;
+    std::uint64_t syncedLoopEndSample_ = 0;
 };
 
 
