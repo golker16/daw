@@ -21,6 +21,5 @@
 
 #include "PUIIndex.h"
 #include "UIDev1.cpp"
-// Add future UI modules here, for example:
-// #include "UIDev2.cpp"
-// #include "UIDev3.cpp"
+#include "UIDev2.cpp"
+#include "UIDev3.cpp"
