@@ -163,6 +163,8 @@ public:
         std::uint32_t clipId = 0;
         std::uint32_t trackId = 0;
         SurfaceRect rect{};
+        std::string label;
+        std::string clipType;
         bool selected = false;
         bool automation = false;
         bool resizeLeftHot = false;
@@ -219,6 +221,7 @@ public:
         bool detached = false;
         bool visible = true;
         std::string title;
+        HWND windowHandle = nullptr;
     };
 
     enum class EditorTool
@@ -385,6 +388,7 @@ private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK PluginManagerProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK DetachedPaneProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     void registerWindowClass();
     void createMainWindow();
@@ -400,7 +404,9 @@ private:
     void invalidateSurface(HWND surface);
     void invalidateAllSurfaces();
     void ensureDetachedWindows();
+    void destroyDetachedWindows();
     void updateDockingModel();
+    void layoutDetachedPaneWindow(DockedPaneState& pane);
 
     void startUiTimer();
     void stopUiTimer();
@@ -499,6 +505,8 @@ private:
     void setPaneVisible(WorkspacePane pane, bool visible);
     DockedPaneState* findDockedPane(WorkspacePane pane);
     const DockedPaneState* findDockedPane(WorkspacePane pane) const;
+    DockedPaneState* findDockedPaneWindow(HWND hwnd);
+    const DockedPaneState* findDockedPaneWindow(HWND hwnd) const;
     void detachPane(WorkspacePane pane);
     void attachPane(WorkspacePane pane);
     std::string paneTitle(WorkspacePane pane) const;
@@ -507,6 +515,7 @@ private:
     static constexpr const char* kWindowClassName = "DAWCloudTemplateWindowClass";
     static constexpr const char* kPluginManagerClassName = "DAWCloudPluginManagerClass";
     static constexpr const char* kSurfaceClassName = "DAWCloudSurfaceClass";
+    static constexpr const char* kDetachedPaneClassName = "DAWCloudDetachedPaneClass";
     static constexpr const char* kWindowTitleBase = "DAW Cloud Template";
     static constexpr UINT_PTR kUiTimerId = 1;
     static constexpr UINT kUiTimerIntervalMs = 250;
