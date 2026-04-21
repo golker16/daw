@@ -202,15 +202,6 @@ public:
         std::vector<UiNoteVisual> pianoNoteVisuals;
     };
 
-    struct DockedPaneState
-    {
-        WorkspacePane pane = WorkspacePane::Playlist;
-        RECT bounds{};
-        bool detached = false;
-        bool visible = true;
-        std::string title;
-    };
-
     enum class WorkspacePane
     {
         Browser,
@@ -219,6 +210,15 @@ public:
         Playlist,
         Mixer,
         Plugin
+    };
+
+    struct DockedPaneState
+    {
+        WorkspacePane pane = WorkspacePane::Playlist;
+        RECT bounds{};
+        bool detached = false;
+        bool visible = true;
+        std::string title;
     };
 
     enum class EditorTool
@@ -488,7 +488,7 @@ private:
     void rebuildChannelSettings();
     void rebuildAutomationLanes();
     PatternState makePatternState(int patternNumber) const;
-    void ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex);
+    void ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIndex) const;
     void drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const;
     void drawSurfaceFrame(HDC dc, const RECT& rect, COLORREF borderColor) const;
     std::string browserDropTargetLabel() const;
@@ -730,6 +730,7 @@ private:
     WorkspaceModel workspaceModel_{};
     std::size_t selectedTrackIndex_ = 0;
 };
+
 
 
 
