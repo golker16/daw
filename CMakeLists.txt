@@ -148,6 +148,8 @@ function(configure_daw_target TARGET_NAME OUTPUT_NAME)
     if(WIN32)
         target_link_libraries(${TARGET_NAME}
             PRIVATE
+                user32
+                gdi32
                 winmm
                 ole32
                 uuid
@@ -182,3 +184,4 @@ message(STATUS "Plugin host target           : ${DAW_BUILD_PLUGIN_HOST_TARGET}")
 message(STATUS "Warnings as errors           : ${DAW_WARNINGS_AS_ERRORS}")
 message(STATUS "Output directory             : ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "========================================")
+
