@@ -22,13 +22,16 @@ jobs:
         uses: lukka/get-cmake@latest
 
       - name: Configure project
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -A x64 -DDAW_BUILD_PLUGIN_HOST_TARGET=ON
 
       - name: Build project
         run: cmake --build build --config Release
 
-      - name: Upload executable artifact
+      - name: Upload executable artifacts
         uses: actions/upload-artifact@v4
         with:
           name: DAWCloudTemplate-windows-x64
-          path: build/Release/DAWCloudTemplate.exe
+          path: |
+            build/bin/Release/DAWCloudTemplate.exe
+            build/bin/Release/DAWCloudPluginHost.exe
+          if-no-files-found: error
