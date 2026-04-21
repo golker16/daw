@@ -13,16 +13,24 @@ namespace
 {
     constexpr int kOuterPadding = 12;
     constexpr int kGap = 8;
-    constexpr int kToolbarHeight = 78;
+    constexpr int kToolbarHeight = 82;
     constexpr int kTransportHeight = 30;
-    constexpr int kInfoStripHeight = 64;
-    constexpr int kBrowserWidth = 290;
-    constexpr int kPluginHeight = 150;
-    constexpr int kMixerHeight = 190;
+    constexpr int kInfoStripHeight = 54;
+    constexpr int kBrowserWidth = 286;
+    constexpr int kBrowserTabCount = 3;
+    constexpr int kBrowserTabHeight = 28;
+    constexpr int kBrowserRowHeight = 44;
+    constexpr int kPluginHeight = 170;
+    constexpr int kMixerHeight = 360;
     constexpr int kSectionHeaderHeight = 24;
+    constexpr int kSurfaceHeaderHeight = 22;
+    constexpr int kDetachedPaneGap = 10;
     constexpr int kStepCount = 16;
     constexpr int kPlaylistCellCount = 32;
     constexpr int kPianoLaneCount = 24;
+    constexpr int kPlaylistLaneHeight = 36;
+    constexpr int kPlaylistTimelineHeight = 28;
+    constexpr int kPlaylistTrackHeaderWidth = 138;
 
     constexpr const char* kNoteNames[12] = {
         "C", "C#", "D", "D#", "E", "F",
@@ -66,6 +74,14 @@ UI::UI(HINSTANCE hInstance, int nCmdShow, AudioEngine& engine)
       nCmdShow_(nCmdShow),
       engine_(engine)
 {
+    workspace_.playlistVisible = true;
+    workspace_.browserVisible = true;
+    workspace_.channelRackVisible = false;
+    workspace_.pianoRollVisible = false;
+    workspace_.mixerVisible = false;
+    workspace_.pluginVisible = false;
+    workspace_.focusedPane = WorkspacePane::Playlist;
+
     dockedPanes_ = {
         {WorkspacePane::Browser, {}, false, true, "Browser"},
         {WorkspacePane::ChannelRack, {}, false, true, "Channel Rack"},
@@ -73,6 +89,18 @@ UI::UI(HINSTANCE hInstance, int nCmdShow, AudioEngine& engine)
         {WorkspacePane::Playlist, {}, false, true, "Playlist"},
         {WorkspacePane::Mixer, {}, false, true, "Mixer"},
         {WorkspacePane::Plugin, {}, false, true, "Plugin"}};
+    detachPane(WorkspacePane::ChannelRack);
+    detachPane(WorkspacePane::Mixer);
+
+    if (DockedPaneState* channelRackPane = findDockedPane(WorkspacePane::ChannelRack))
+    {
+        channelRackPane->bounds = RECT{120, 120, 700, 670};
+    }
+    if (DockedPaneState* mixerPane = findDockedPane(WorkspacePane::Mixer))
+    {
+        mixerPane->bounds = RECT{220, 160, 1320, 590};
+    }
+
     registerWindowClass();
     createMainWindow();
     createMainMenu();
@@ -155,6 +183,7 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_DESTROY:
         if (ui != nullptr)
         {
+            ui->destroyDetachedWindows();
             ui->stopUiTimer();
         }
         PostQuitMessage(0);
@@ -258,15 +287,90 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     return DefWindowProcA(hwnd, uMsg, wParam, lParam);
 }
 
+LRESULT CALLBACK UI::DetachedPaneProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UI* ui = nullptr;
+
+    if (uMsg == WM_NCCREATE)
+    {
+        CREATESTRUCTA* createStruct = reinterpret_cast<CREATESTRUCTA*>(lParam);
+        ui = reinterpret_cast<UI*>(createStruct->lpCreateParams);
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ui));
+    }
+    else
+    {
+        ui = reinterpret_cast<UI*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+    }
+
+    if (ui == nullptr)
+    {
+        return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+    }
+
+    DockedPaneState* pane = ui->findDockedPaneWindow(hwnd);
+
+    switch (uMsg)
+    {
+    case WM_SIZE:
+        if (pane != nullptr)
+        {
+            ui->layoutDetachedPaneWindow(*pane);
+            GetWindowRect(hwnd, &pane->bounds);
+            return 0;
+        }
+        break;
+
+    case WM_MOVE:
+    case WM_EXITSIZEMOVE:
+        if (pane != nullptr)
+        {
+            GetWindowRect(hwnd, &pane->bounds);
+            return 0;
+        }
+        break;
+
+    case WM_SETFOCUS:
+        if (pane != nullptr)
+        {
+            ui->workspace_.focusedPane = pane->pane;
+            ui->updateViewButtons();
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        if (pane != nullptr)
+        {
+            ui->setPaneVisible(pane->pane, false);
+            ui->workspace_.focusedPane = WorkspacePane::Playlist;
+            ui->updateDockingModel();
+            ui->updateViewButtons();
+            ShowWindow(hwnd, SW_HIDE);
+            ui->layoutControls();
+            ui->refreshFromEngineSnapshot();
+            return 0;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
 void UI::registerWindowClass()
 {
+    static HBRUSH darkFrameBrush = CreateSolidBrush(RGB(27, 31, 37));
+    static HBRUSH darkPanelBrush = CreateSolidBrush(RGB(24, 28, 34));
+
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEXA);
     wc.lpfnWndProc = UI::WindowProc;
     wc.hInstance = hInstance_;
     wc.lpszClassName = kWindowClassName;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hbrBackground = darkFrameBrush;
 
     if (!RegisterClassExA(&wc))
     {
@@ -279,7 +383,7 @@ void UI::registerWindowClass()
     managerClass.hInstance = hInstance_;
     managerClass.lpszClassName = kPluginManagerClassName;
     managerClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    managerClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    managerClass.hbrBackground = darkPanelBrush;
 
     if (!RegisterClassExA(&managerClass))
     {
@@ -292,11 +396,24 @@ void UI::registerWindowClass()
     surfaceClass.hInstance = hInstance_;
     surfaceClass.lpszClassName = kSurfaceClassName;
     surfaceClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    surfaceClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    surfaceClass.hbrBackground = darkPanelBrush;
 
     if (!RegisterClassExA(&surfaceClass))
     {
         throw UiInitializationException("No se pudo registrar la clase de superficies custom.");
+    }
+
+    WNDCLASSEXA detachedPaneClass{};
+    detachedPaneClass.cbSize = sizeof(WNDCLASSEXA);
+    detachedPaneClass.lpfnWndProc = UI::DetachedPaneProc;
+    detachedPaneClass.hInstance = hInstance_;
+    detachedPaneClass.lpszClassName = kDetachedPaneClassName;
+    detachedPaneClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    detachedPaneClass.hbrBackground = darkPanelBrush;
+
+    if (!RegisterClassExA(&detachedPaneClass))
+    {
+        throw UiInitializationException("No se pudo registrar la clase de paneles desacoplados.");
     }
 }
 
@@ -400,7 +517,6 @@ void UI::createControls()
     const DWORD buttonStyle = WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON;
     const DWORD checkboxStyle = WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX;
     const DWORD staticStyle = WS_VISIBLE | WS_CHILD | SS_LEFT;
-    const DWORD panelStyle = WS_VISIBLE | WS_CHILD | WS_BORDER | SS_LEFT;
 
     engineStartButton_ = CreateWindowA("BUTTON", "Engine", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonEngineStart), hInstance_, nullptr);
     engineStopButton_ = CreateWindowA("BUTTON", "Stop Eng", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonEngineStop), hInstance_, nullptr);
@@ -521,204 +637,250 @@ void UI::layoutControls()
 
     const int width = clientRect.right - clientRect.left;
     const int height = clientRect.bottom - clientRect.top;
-    const int contentWidth = std::max(400, width - (kOuterPadding * 2));
+    const int contentWidth = std::max(420, width - (kOuterPadding * 2));
 
-    int y = kOuterPadding;
-    const int toolbarY = y;
+    int x = kOuterPadding;
+    const int row1Y = kOuterPadding;
+    const int row2Y = row1Y + 38;
 
-    MoveWindow(engineStartButton_, kOuterPadding, toolbarY, 70, kTransportHeight, TRUE);
-    MoveWindow(engineStopButton_, kOuterPadding + 74, toolbarY, 78, kTransportHeight, TRUE);
-    MoveWindow(playButton_, kOuterPadding + 160, toolbarY, 56, kTransportHeight, TRUE);
-    MoveWindow(stopTransportButton_, kOuterPadding + 220, toolbarY, 56, kTransportHeight, TRUE);
-    MoveWindow(recordButton_, kOuterPadding + 280, toolbarY, 56, kTransportHeight, TRUE);
-    MoveWindow(patSongButton_, kOuterPadding + 344, toolbarY, 62, kTransportHeight, TRUE);
+    const auto placeRow1Button = [&](HWND control, int buttonWidth)
+    {
+        MoveWindow(control, x, row1Y, buttonWidth, kTransportHeight, TRUE);
+        x += buttonWidth + 6;
+    };
 
-    MoveWindow(tempoDownButton_, kOuterPadding + 420, toolbarY, 24, kTransportHeight, TRUE);
-    MoveWindow(tempoLabel_, kOuterPadding + 448, toolbarY + 6, 78, 20, TRUE);
-    MoveWindow(tempoUpButton_, kOuterPadding + 530, toolbarY, 24, kTransportHeight, TRUE);
+    placeRow1Button(engineStartButton_, 74);
+    placeRow1Button(engineStopButton_, 84);
+    placeRow1Button(playButton_, 58);
+    placeRow1Button(stopTransportButton_, 58);
+    placeRow1Button(recordButton_, 52);
+    placeRow1Button(patSongButton_, 58);
+    placeRow1Button(tempoDownButton_, 24);
+    MoveWindow(tempoLabel_, x, row1Y + 6, 84, 20, TRUE);
+    x += 90;
+    placeRow1Button(tempoUpButton_, 24);
+    placeRow1Button(patternPrevButton_, 24);
+    MoveWindow(patternLabel_, x, row1Y + 6, 96, 20, TRUE);
+    x += 102;
+    placeRow1Button(patternNextButton_, 24);
+    placeRow1Button(snapPrevButton_, 24);
+    MoveWindow(snapLabel_, x, row1Y + 6, 108, 20, TRUE);
+    x += 114;
+    placeRow1Button(snapNextButton_, 24);
+    placeRow1Button(browserButton_, 72);
+    placeRow1Button(channelRackButton_, 64);
+    placeRow1Button(mixerButton_, 64);
+    placeRow1Button(pianoRollButton_, 64);
+    placeRow1Button(pluginButton_, 64);
+    placeRow1Button(playlistButton_, 70);
 
-    MoveWindow(patternPrevButton_, kOuterPadding + 568, toolbarY, 24, kTransportHeight, TRUE);
-    MoveWindow(patternLabel_, kOuterPadding + 596, toolbarY + 6, 92, 20, TRUE);
-    MoveWindow(patternNextButton_, kOuterPadding + 692, toolbarY, 24, kTransportHeight, TRUE);
+    x = kOuterPadding;
+    const auto placeRow2Button = [&](HWND control, int buttonWidth)
+    {
+        MoveWindow(control, x, row2Y, buttonWidth, 28, TRUE);
+        x += buttonWidth + 6;
+    };
 
-    MoveWindow(snapPrevButton_, kOuterPadding + 730, toolbarY, 24, kTransportHeight, TRUE);
-    MoveWindow(snapLabel_, kOuterPadding + 758, toolbarY + 6, 112, 20, TRUE);
-    MoveWindow(snapNextButton_, kOuterPadding + 874, toolbarY, 24, kTransportHeight, TRUE);
+    placeRow2Button(addTrackButton_, 88);
+    placeRow2Button(addClipButton_, 72);
+    placeRow2Button(addBusButton_, 72);
+    placeRow2Button(undoButton_, 60);
+    placeRow2Button(redoButton_, 60);
+    placeRow2Button(saveProjectButton_, 60);
+    placeRow2Button(loadProjectButton_, 60);
+    placeRow2Button(prevTrackButton_, 72);
+    placeRow2Button(nextTrackButton_, 72);
+    placeRow2Button(rebuildGraphButton_, 68);
+    placeRow2Button(renderOfflineButton_, 68);
+    placeRow2Button(managePluginsButton_, 82);
 
-    MoveWindow(browserButton_, kOuterPadding + 912, toolbarY, 66, kTransportHeight, TRUE);
-    MoveWindow(channelRackButton_, kOuterPadding + 982, toolbarY, 60, kTransportHeight, TRUE);
-    MoveWindow(pianoRollButton_, kOuterPadding + 1046, toolbarY, 60, kTransportHeight, TRUE);
-    MoveWindow(playlistButton_, kOuterPadding + 1110, toolbarY, 66, kTransportHeight, TRUE);
-    MoveWindow(mixerButton_, kOuterPadding + 1180, toolbarY, 60, kTransportHeight, TRUE);
-    MoveWindow(pluginButton_, kOuterPadding + 1244, toolbarY, 60, kTransportHeight, TRUE);
+    MoveWindow(automationCheckbox_, x, row2Y + 4, 98, 22, TRUE);
+    x += 104;
+    MoveWindow(pdcCheckbox_, x, row2Y + 4, 52, 22, TRUE);
+    x += 58;
+    MoveWindow(anticipativeCheckbox_, x, row2Y + 4, 102, 22, TRUE);
+    x += 108;
+    MoveWindow(systemLabel_, x, row2Y + 4, std::max(120, contentWidth - (x - kOuterPadding)), 22, TRUE);
 
-    MoveWindow(addTrackButton_, kOuterPadding, toolbarY + 38, 86, 28, TRUE);
-    MoveWindow(addBusButton_, kOuterPadding + 90, toolbarY + 38, 72, 28, TRUE);
-    MoveWindow(addClipButton_, kOuterPadding + 166, toolbarY + 38, 72, 28, TRUE);
-    MoveWindow(undoButton_, kOuterPadding + 242, toolbarY + 38, 60, 28, TRUE);
-    MoveWindow(redoButton_, kOuterPadding + 306, toolbarY + 38, 60, 28, TRUE);
-    MoveWindow(saveProjectButton_, kOuterPadding + 370, toolbarY + 38, 60, 28, TRUE);
-    MoveWindow(loadProjectButton_, kOuterPadding + 434, toolbarY + 38, 60, 28, TRUE);
-    MoveWindow(prevTrackButton_, kOuterPadding + 498, toolbarY + 38, 70, 28, TRUE);
-    MoveWindow(nextTrackButton_, kOuterPadding + 572, toolbarY + 38, 70, 28, TRUE);
-    MoveWindow(rebuildGraphButton_, kOuterPadding + 646, toolbarY + 38, 68, 28, TRUE);
-    MoveWindow(renderOfflineButton_, kOuterPadding + 718, toolbarY + 38, 66, 28, TRUE);
-    MoveWindow(managePluginsButton_, kOuterPadding + 788, toolbarY + 38, 76, 28, TRUE);
-    MoveWindow(automationCheckbox_, kOuterPadding + 874, toolbarY + 42, 92, 22, TRUE);
-    MoveWindow(pdcCheckbox_, kOuterPadding + 972, toolbarY + 42, 50, 22, TRUE);
-    MoveWindow(anticipativeCheckbox_, kOuterPadding + 1028, toolbarY + 42, 96, 22, TRUE);
-    MoveWindow(systemLabel_, kOuterPadding + 1130, toolbarY + 41, std::max(110, contentWidth - 1140), 24, TRUE);
-
-    y += kToolbarHeight + kGap;
-
-    MoveWindow(statusLabel_, kOuterPadding, y, contentWidth, 22, TRUE);
-    MoveWindow(projectSummaryLabel_, kOuterPadding, y + 24, contentWidth, 18, TRUE);
-    MoveWindow(documentLabel_, kOuterPadding, y + 42, contentWidth / 2, 18, TRUE);
-    MoveWindow(selectionLabel_, kOuterPadding + (contentWidth / 2), y + 42, contentWidth / 2, 18, TRUE);
+    int y = kOuterPadding + kToolbarHeight + kGap;
+    MoveWindow(statusLabel_, kOuterPadding, y, contentWidth, 20, TRUE);
+    MoveWindow(projectSummaryLabel_, kOuterPadding, y + 20, contentWidth, 18, TRUE);
+    MoveWindow(documentLabel_, kOuterPadding, y + 38, contentWidth / 2, 16, TRUE);
+    MoveWindow(selectionLabel_, kOuterPadding + (contentWidth / 2), y + 38, contentWidth / 2, 16, TRUE);
     y += kInfoStripHeight + kGap;
 
+    const int footerHeight = 18;
     const int browserAreaWidth = workspace_.browserVisible ? kBrowserWidth : 0;
     const int workspaceX = kOuterPadding + browserAreaWidth + (workspace_.browserVisible ? kGap : 0);
-    const int workspaceWidth = width - workspaceX - kOuterPadding;
-    const int workspaceHeight = height - y - kOuterPadding;
-    updateDockingModel();
-    ensureDetachedWindows();
+    const int workspaceWidth = std::max(180, width - workspaceX - kOuterPadding);
+    const int workspaceHeight = std::max(180, height - y - kOuterPadding - footerHeight - 4);
 
-    ShowWindow(browserMenuButton_, workspace_.browserVisible ? SW_SHOW : SW_HIDE);
+    ShowWindow(browserMenuButton_, SW_HIDE);
+    ShowWindow(browserTabPrevButton_, SW_HIDE);
+    ShowWindow(browserTabNextButton_, SW_HIDE);
+    ShowWindow(browserHeaderLabel_, SW_HIDE);
+    ShowWindow(channelRackMenuButton_, SW_HIDE);
+    ShowWindow(channelHeaderLabel_, SW_HIDE);
+    ShowWindow(playlistMenuButton_, SW_HIDE);
+    ShowWindow(playlistZoomPrevButton_, SW_HIDE);
+    ShowWindow(playlistZoomNextButton_, SW_HIDE);
+    ShowWindow(playlistToolPrevButton_, SW_HIDE);
+    ShowWindow(playlistToolNextButton_, SW_HIDE);
+    ShowWindow(playlistHeaderLabel_, SW_HIDE);
+    ShowWindow(mixerMenuButton_, SW_HIDE);
+    ShowWindow(mixerHeaderLabel_, SW_HIDE);
+    ShowWindow(pianoRollMenuButton_, SW_HIDE);
+    ShowWindow(pianoZoomPrevButton_, SW_HIDE);
+    ShowWindow(pianoZoomNextButton_, SW_HIDE);
+    ShowWindow(pianoToolPrevButton_, SW_HIDE);
+    ShowWindow(pianoToolNextButton_, SW_HIDE);
+    ShowWindow(pianoHeaderLabel_, SW_HIDE);
+    ShowWindow(pluginMenuButton_, SW_HIDE);
+    ShowWindow(pluginHeaderLabel_, SW_HIDE);
+
+    updateDockingModel();
+
     ShowWindow(browserPanel_, workspace_.browserVisible ? SW_SHOW : SW_HIDE);
     if (workspace_.browserVisible)
     {
-        MoveWindow(browserMenuButton_, kOuterPadding + browserAreaWidth - 28, y, 28, kSectionHeaderHeight, TRUE);
-        MoveWindow(browserTabPrevButton_, kOuterPadding + browserAreaWidth - 84, y, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(browserTabNextButton_, kOuterPadding + browserAreaWidth - 56, y, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(browserHeaderLabel_, kOuterPadding + 8, y + 4, browserAreaWidth - 96, 18, TRUE);
-        MoveWindow(browserPanel_, kOuterPadding, y + kSectionHeaderHeight, browserAreaWidth, workspaceHeight - kSectionHeaderHeight - 24, TRUE);
-        MoveWindow(contextLabel_, kOuterPadding, y + workspaceHeight - 20, browserAreaWidth, 18, TRUE);
-        ShowWindow(contextLabel_, SW_SHOW);
+        MoveWindow(browserPanel_, kOuterPadding, y, browserAreaWidth, workspaceHeight, TRUE);
         if (DockedPaneState* pane = findDockedPane(WorkspacePane::Browser))
         {
             pane->bounds = RECT{kOuterPadding, y, kOuterPadding + browserAreaWidth, y + workspaceHeight};
         }
     }
+
+    workspace_.playlistVisible = true;
+    ShowWindow(playlistPanel_, SW_SHOW);
+
+    const int lowerDockCount = (workspace_.pianoRollVisible ? 1 : 0) + (workspace_.pluginVisible ? 1 : 0);
+    const int lowerDockHeight = lowerDockCount == 0 ? 0 : (lowerDockCount == 1 ? 190 : 220);
+    const int playlistHeight =
+        std::max(160, workspaceHeight - (lowerDockHeight > 0 ? lowerDockHeight + kGap : 0));
+    MoveWindow(playlistPanel_, workspaceX, y, workspaceWidth, playlistHeight, TRUE);
+
+    if (DockedPaneState* pane = findDockedPane(WorkspacePane::Playlist))
+    {
+        pane->bounds = RECT{workspaceX, y, workspaceX + workspaceWidth, y + playlistHeight};
+    }
+
+    const int lowerDockY = y + playlistHeight + (lowerDockHeight > 0 ? kGap : 0);
+    if (workspace_.pianoRollVisible || workspace_.pluginVisible)
+    {
+        if (workspace_.pianoRollVisible && workspace_.pluginVisible)
+        {
+            const int pianoWidth = (workspaceWidth * 58) / 100;
+            ShowWindow(pianoRollPanel_, SW_SHOW);
+            ShowWindow(pluginPanel_, SW_SHOW);
+            MoveWindow(pianoRollPanel_, workspaceX, lowerDockY, pianoWidth, lowerDockHeight, TRUE);
+            MoveWindow(pluginPanel_, workspaceX + pianoWidth + kGap, lowerDockY, workspaceWidth - pianoWidth - kGap, lowerDockHeight, TRUE);
+        }
+        else if (workspace_.pianoRollVisible)
+        {
+            ShowWindow(pianoRollPanel_, SW_SHOW);
+            ShowWindow(pluginPanel_, SW_HIDE);
+            MoveWindow(pianoRollPanel_, workspaceX, lowerDockY, workspaceWidth, lowerDockHeight, TRUE);
+        }
+        else
+        {
+            ShowWindow(pianoRollPanel_, SW_HIDE);
+            ShowWindow(pluginPanel_, SW_SHOW);
+            MoveWindow(pluginPanel_, workspaceX, lowerDockY, workspaceWidth, lowerDockHeight, TRUE);
+        }
+    }
     else
     {
-        ShowWindow(browserTabPrevButton_, SW_HIDE);
-        ShowWindow(browserTabNextButton_, SW_HIDE);
-        ShowWindow(browserHeaderLabel_, SW_HIDE);
-        ShowWindow(contextLabel_, SW_HIDE);
+        ShowWindow(pianoRollPanel_, SW_HIDE);
+        ShowWindow(pluginPanel_, SW_HIDE);
     }
 
-    if (workspaceWidth <= 120 || workspaceHeight <= 120)
+    if (DockedPaneState* pane = findDockedPane(WorkspacePane::PianoRoll))
     {
-        return;
+        pane->bounds = RECT{
+            workspaceX,
+            lowerDockY,
+            workspaceX + (workspace_.pluginVisible && workspace_.pianoRollVisible ? (workspaceWidth * 58) / 100 : workspaceWidth),
+            lowerDockY + lowerDockHeight};
+    }
+    if (DockedPaneState* pane = findDockedPane(WorkspacePane::Plugin))
+    {
+        pane->bounds = RECT{
+            workspace_.pluginVisible && workspace_.pianoRollVisible ? workspaceX + ((workspaceWidth * 58) / 100) + kGap : workspaceX,
+            lowerDockY,
+            workspaceX + workspaceWidth,
+            lowerDockY + lowerDockHeight};
     }
 
-    const int topRegionHeight = workspaceHeight - kMixerHeight - (workspace_.pluginVisible ? (kPluginHeight + kGap) : 0) - kGap;
-    const int leftWidth = std::max(250, (workspaceWidth * 33) / 100);
-    const int rightWidth = workspaceWidth - leftWidth - kGap;
-    const int channelRackHeight = std::max(160, (topRegionHeight * 43) / 100);
-    const int pianoRollHeight = std::max(150, topRegionHeight - channelRackHeight - kGap);
-    const int playlistHeight = topRegionHeight;
-    const int mixerY = y + topRegionHeight + kGap;
-    const int pluginY = mixerY + kMixerHeight + kGap;
+    ShowWindow(channelRackPanel_, SW_HIDE);
+    ShowWindow(stepSequencerPanel_, SW_HIDE);
+    ShowWindow(mixerPanel_, SW_HIDE);
+    ShowWindow(contextLabel_, SW_HIDE);
 
-    const auto placePanel =
-        [&](bool visible, HWND menuButton, HWND panel, int x, int panelY, int panelWidth, int panelHeight)
-    {
-        ShowWindow(menuButton, visible ? SW_SHOW : SW_HIDE);
-        ShowWindow(panel, visible ? SW_SHOW : SW_HIDE);
-        if (!visible)
-        {
-            return;
-        }
-
-        MoveWindow(menuButton, x + panelWidth - 28, panelY, 28, kSectionHeaderHeight, TRUE);
-        MoveWindow(panel, x, panelY + kSectionHeaderHeight, panelWidth, std::max(60, panelHeight - kSectionHeaderHeight), TRUE);
-    };
-
-    placePanel(workspace_.channelRackVisible, channelRackMenuButton_, channelRackPanel_, workspaceX, y, leftWidth, channelRackHeight / 2);
-    ShowWindow(channelHeaderLabel_, workspace_.channelRackVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.channelRackVisible)
-    {
-        MoveWindow(channelHeaderLabel_, workspaceX + 8, y + 4, leftWidth - 40, 18, TRUE);
-        if (DockedPaneState* pane = findDockedPane(WorkspacePane::ChannelRack))
-        {
-            pane->bounds = RECT{workspaceX, y, workspaceX + leftWidth, y + channelRackHeight};
-        }
-    }
-    ShowWindow(stepSequencerPanel_, workspace_.channelRackVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.channelRackVisible)
-    {
-        MoveWindow(stepSequencerPanel_, workspaceX, y + (channelRackHeight / 2) + kGap, leftWidth, std::max(72, (channelRackHeight / 2) - kGap), TRUE);
-    }
-
-    placePanel(workspace_.pianoRollVisible, pianoRollMenuButton_, pianoRollPanel_, workspaceX, y + channelRackHeight + kGap, leftWidth, pianoRollHeight);
-    ShowWindow(pianoZoomPrevButton_, workspace_.pianoRollVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(pianoZoomNextButton_, workspace_.pianoRollVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(pianoToolPrevButton_, workspace_.pianoRollVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(pianoToolNextButton_, workspace_.pianoRollVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(pianoHeaderLabel_, workspace_.pianoRollVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.pianoRollVisible)
-    {
-        const int pianoHeaderY = y + channelRackHeight + kGap;
-        MoveWindow(pianoHeaderLabel_, workspaceX + 8, pianoHeaderY + 4, leftWidth - 136, 18, TRUE);
-        MoveWindow(pianoZoomPrevButton_, workspaceX + leftWidth - 132, pianoHeaderY, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(pianoZoomNextButton_, workspaceX + leftWidth - 104, pianoHeaderY, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(pianoToolPrevButton_, workspaceX + leftWidth - 76, pianoHeaderY, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(pianoToolNextButton_, workspaceX + leftWidth - 48, pianoHeaderY, 24, kSectionHeaderHeight, TRUE);
-        if (DockedPaneState* pane = findDockedPane(WorkspacePane::PianoRoll))
-        {
-            pane->bounds = RECT{workspaceX, pianoHeaderY, workspaceX + leftWidth, pianoHeaderY + pianoRollHeight};
-        }
-    }
-    placePanel(workspace_.playlistVisible, playlistMenuButton_, playlistPanel_, workspaceX + leftWidth + kGap, y, rightWidth, playlistHeight);
-    ShowWindow(playlistZoomPrevButton_, workspace_.playlistVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(playlistZoomNextButton_, workspace_.playlistVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(playlistToolPrevButton_, workspace_.playlistVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(playlistToolNextButton_, workspace_.playlistVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(playlistHeaderLabel_, workspace_.playlistVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.playlistVisible)
-    {
-        MoveWindow(playlistHeaderLabel_, workspaceX + leftWidth + kGap + 8, y + 4, rightWidth - 136, 18, TRUE);
-        MoveWindow(playlistZoomPrevButton_, workspaceX + workspaceWidth - 132, y, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(playlistZoomNextButton_, workspaceX + workspaceWidth - 104, y, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(playlistToolPrevButton_, workspaceX + workspaceWidth - 76, y, 24, kSectionHeaderHeight, TRUE);
-        MoveWindow(playlistToolNextButton_, workspaceX + workspaceWidth - 48, y, 24, kSectionHeaderHeight, TRUE);
-        if (DockedPaneState* pane = findDockedPane(WorkspacePane::Playlist))
-        {
-            pane->bounds = RECT{workspaceX + leftWidth + kGap, y, workspaceX + workspaceWidth, y + playlistHeight};
-        }
-    }
-    placePanel(workspace_.mixerVisible, mixerMenuButton_, mixerPanel_, workspaceX, mixerY, workspaceWidth, kMixerHeight);
-    ShowWindow(mixerHeaderLabel_, workspace_.mixerVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.mixerVisible)
-    {
-        MoveWindow(mixerHeaderLabel_, workspaceX + 8, mixerY + 4, workspaceWidth - 40, 18, TRUE);
-        if (DockedPaneState* pane = findDockedPane(WorkspacePane::Mixer))
-        {
-            pane->bounds = RECT{workspaceX, mixerY, workspaceX + workspaceWidth, mixerY + kMixerHeight};
-        }
-    }
-    placePanel(workspace_.pluginVisible, pluginMenuButton_, pluginPanel_, workspaceX, pluginY, workspaceWidth, kPluginHeight);
-    ShowWindow(pluginHeaderLabel_, workspace_.pluginVisible ? SW_SHOW : SW_HIDE);
-    if (workspace_.pluginVisible)
-    {
-        MoveWindow(pluginHeaderLabel_, workspaceX + 8, pluginY + 4, workspaceWidth - 40, 18, TRUE);
-        if (DockedPaneState* pane = findDockedPane(WorkspacePane::Plugin))
-        {
-            pane->bounds = RECT{workspaceX, pluginY, workspaceX + workspaceWidth, pluginY + kPluginHeight};
-        }
-    }
-
-    MoveWindow(hintsLabel_, workspaceX, height - kOuterPadding - 18, workspaceWidth, 18, TRUE);
+    MoveWindow(hintsLabel_, workspaceX, height - kOuterPadding - footerHeight, workspaceWidth, footerHeight, TRUE);
+    ensureDetachedWindows();
 }
 
 void UI::ensureDetachedWindows()
 {
-    for (const auto& pane : dockedPanes_)
+    const auto ensureDetachedPane =
+        [this](WorkspacePane paneId, int defaultWidth, int defaultHeight)
     {
-        (void)pane;
-    }
+        DockedPaneState* pane = findDockedPane(paneId);
+        if (pane == nullptr || !pane->detached)
+        {
+            return;
+        }
+
+        if (pane->windowHandle == nullptr)
+        {
+            const int x = pane->bounds.right > pane->bounds.left ? pane->bounds.left : CW_USEDEFAULT;
+            const int y = pane->bounds.bottom > pane->bounds.top ? pane->bounds.top : CW_USEDEFAULT;
+            const int width = pane->bounds.right > pane->bounds.left ? (pane->bounds.right - pane->bounds.left) : defaultWidth;
+            const int height = pane->bounds.bottom > pane->bounds.top ? (pane->bounds.bottom - pane->bounds.top) : defaultHeight;
+
+            pane->windowHandle = CreateWindowExA(
+                WS_EX_TOOLWINDOW,
+                kDetachedPaneClassName,
+                pane->title.c_str(),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                x,
+                y,
+                width,
+                height,
+                hwnd_,
+                nullptr,
+                hInstance_,
+                this);
+
+            if (pane->windowHandle == nullptr)
+            {
+                throw UiInitializationException("No se pudo crear una ventana desacoplada.");
+            }
+        }
+
+        if (paneId == WorkspacePane::ChannelRack)
+        {
+            SetParent(channelRackPanel_, pane->windowHandle);
+            SetParent(stepSequencerPanel_, pane->windowHandle);
+            ShowWindow(channelRackPanel_, pane->visible ? SW_SHOW : SW_HIDE);
+            ShowWindow(stepSequencerPanel_, pane->visible ? SW_SHOW : SW_HIDE);
+        }
+        else if (paneId == WorkspacePane::Mixer)
+        {
+            SetParent(mixerPanel_, pane->windowHandle);
+            ShowWindow(mixerPanel_, pane->visible ? SW_SHOW : SW_HIDE);
+        }
+
+        SetWindowTextA(pane->windowHandle, pane->title.c_str());
+        ShowWindow(pane->windowHandle, pane->visible ? SW_SHOW : SW_HIDE);
+        if (pane->visible)
+        {
+            layoutDetachedPaneWindow(*pane);
+        }
+    };
+
+    ensureDetachedPane(WorkspacePane::ChannelRack, 560, 540);
+    ensureDetachedPane(WorkspacePane::Mixer, 1080, 420);
 }
 
 void UI::updateDockingModel()
@@ -727,6 +889,10 @@ void UI::updateDockingModel()
     {
         pane.visible = isPaneVisible(pane.pane);
         pane.title = paneTitle(pane.pane);
+        if (pane.windowHandle != nullptr)
+        {
+            SetWindowTextA(pane.windowHandle, pane.title.c_str());
+        }
     }
 }
 
@@ -915,6 +1081,44 @@ void UI::invalidateAllSurfaces()
     invalidateSurface(playlistPanel_);
     invalidateSurface(mixerPanel_);
     invalidateSurface(pluginPanel_);
+}
+
+void UI::destroyDetachedWindows()
+{
+    for (auto& pane : dockedPanes_)
+    {
+        if (pane.windowHandle != nullptr)
+        {
+            DestroyWindow(pane.windowHandle);
+            pane.windowHandle = nullptr;
+        }
+    }
+}
+
+void UI::layoutDetachedPaneWindow(DockedPaneState& pane)
+{
+    if (pane.windowHandle == nullptr)
+    {
+        return;
+    }
+
+    RECT clientRect{};
+    GetClientRect(pane.windowHandle, &clientRect);
+    const int width = std::max(200, static_cast<int>(clientRect.right - clientRect.left));
+    const int height = std::max(160, static_cast<int>(clientRect.bottom - clientRect.top));
+
+    if (pane.pane == WorkspacePane::ChannelRack)
+    {
+        const int topHeight = std::max(180, (height * 54) / 100);
+        MoveWindow(channelRackPanel_, 0, 0, width, topHeight, TRUE);
+        MoveWindow(stepSequencerPanel_, 0, topHeight + kDetachedPaneGap, width, std::max(120, height - topHeight - kDetachedPaneGap), TRUE);
+    }
+    else if (pane.pane == WorkspacePane::Mixer)
+    {
+        MoveWindow(mixerPanel_, 0, 0, width, height, TRUE);
+    }
+
+    GetWindowRect(pane.windowHandle, &pane.bounds);
 }
 
 void UI::startUiTimer()
@@ -1156,7 +1360,7 @@ void UI::updateWorkspacePanels()
 
     setStaticText(
         hintsLabel_,
-        "Shortcuts: F5 Playlist | F6 Channel Rack | F7 Piano Roll | F9 Mixer | Alt+F8 Browser | Space Play | +/- Zoom in panes");
+        "Shortcuts: Alt+F8 Browser | F5 Arrange | F6 Channel Rack window | F7 Piano Roll | F9 Mixer window | Space Play | +/- Zoom");
 
     setStaticText(browserHeaderLabel_, "Browser | " + currentBrowserTabLabel());
     setStaticText(channelHeaderLabel_, "Channel Rack | Target " + (visibleState_.selection.selectedTrackName.empty() ? std::string("<none>") : visibleState_.selection.selectedTrackName));
@@ -1172,7 +1376,7 @@ void UI::updateViewButtons()
     SetWindowTextA(browserButton_, workspace_.browserVisible ? "Browser*" : "Browser");
     SetWindowTextA(channelRackButton_, workspace_.channelRackVisible ? "Rack*" : "Rack");
     SetWindowTextA(pianoRollButton_, workspace_.pianoRollVisible ? "Piano*" : "Piano");
-    SetWindowTextA(playlistButton_, workspace_.playlistVisible ? "Playlist*" : "Playlist");
+    SetWindowTextA(playlistButton_, "Arrange");
     SetWindowTextA(mixerButton_, workspace_.mixerVisible ? "Mixer*" : "Mixer");
     SetWindowTextA(pluginButton_, workspace_.pluginVisible ? "Plugin*" : "Plugin");
 }
@@ -1748,11 +1952,11 @@ void UI::cycleBrowserTab(int delta)
     const int newIndex = static_cast<int>(workspace_.browserTabIndex) + delta;
     if (newIndex < 0)
     {
-        workspace_.browserTabIndex = 4;
+        workspace_.browserTabIndex = kBrowserTabCount - 1;
     }
     else
     {
-        workspace_.browserTabIndex = static_cast<std::size_t>(newIndex) % 5;
+        workspace_.browserTabIndex = static_cast<std::size_t>(newIndex) % kBrowserTabCount;
     }
 }
 
@@ -1786,65 +1990,36 @@ void UI::cycleSnap(int delta)
 
 void UI::togglePane(WorkspacePane pane)
 {
-    const auto visibleWorkspacePanelCount = [this]() -> int
-    {
-        return (workspace_.channelRackVisible ? 1 : 0) +
-               (workspace_.pianoRollVisible ? 1 : 0) +
-               (workspace_.playlistVisible ? 1 : 0) +
-               (workspace_.mixerVisible ? 1 : 0) +
-               (workspace_.pluginVisible ? 1 : 0);
-    };
-
     switch (pane)
     {
     case WorkspacePane::Browser:
         workspace_.browserVisible = !workspace_.browserVisible;
-        workspace_.focusedPane = WorkspacePane::Browser;
+        workspace_.focusedPane = workspace_.browserVisible ? WorkspacePane::Browser : WorkspacePane::Playlist;
         break;
 
     case WorkspacePane::ChannelRack:
-        if (workspace_.channelRackVisible && visibleWorkspacePanelCount() == 1)
-        {
-            return;
-        }
         workspace_.channelRackVisible = !workspace_.channelRackVisible;
-        workspace_.focusedPane = WorkspacePane::ChannelRack;
+        workspace_.focusedPane = workspace_.channelRackVisible ? WorkspacePane::ChannelRack : WorkspacePane::Playlist;
         break;
 
     case WorkspacePane::PianoRoll:
-        if (workspace_.pianoRollVisible && visibleWorkspacePanelCount() == 1)
-        {
-            return;
-        }
         workspace_.pianoRollVisible = !workspace_.pianoRollVisible;
-        workspace_.focusedPane = WorkspacePane::PianoRoll;
+        workspace_.focusedPane = workspace_.pianoRollVisible ? WorkspacePane::PianoRoll : WorkspacePane::Playlist;
         break;
 
     case WorkspacePane::Playlist:
-        if (workspace_.playlistVisible && visibleWorkspacePanelCount() == 1)
-        {
-            return;
-        }
-        workspace_.playlistVisible = !workspace_.playlistVisible;
+        workspace_.playlistVisible = true;
         workspace_.focusedPane = WorkspacePane::Playlist;
         break;
 
     case WorkspacePane::Mixer:
-        if (workspace_.mixerVisible && visibleWorkspacePanelCount() == 1)
-        {
-            return;
-        }
         workspace_.mixerVisible = !workspace_.mixerVisible;
-        workspace_.focusedPane = WorkspacePane::Mixer;
+        workspace_.focusedPane = workspace_.mixerVisible ? WorkspacePane::Mixer : WorkspacePane::Playlist;
         break;
 
     case WorkspacePane::Plugin:
-        if (workspace_.pluginVisible && visibleWorkspacePanelCount() == 1)
-        {
-            return;
-        }
         workspace_.pluginVisible = !workspace_.pluginVisible;
-        workspace_.focusedPane = WorkspacePane::Plugin;
+        workspace_.focusedPane = workspace_.pluginVisible ? WorkspacePane::Plugin : WorkspacePane::Playlist;
         break;
     }
 }
@@ -1857,8 +2032,8 @@ std::string UI::currentSnapLabel() const
 
 std::string UI::currentBrowserTabLabel() const
 {
-    static constexpr const char* kBrowserTabs[] = {"Packs", "Plugin DB", "Current Project", "Automation", "Disk"};
-    return kBrowserTabs[std::min<std::size_t>(workspace_.browserTabIndex, 4)];
+    static constexpr const char* kBrowserTabs[] = {"Patterns", "Audio Clips", "Automation Clips"};
+    return kBrowserTabs[std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1)];
 }
 
 std::string UI::currentZoomLabel(bool pianoRoll) const
@@ -2322,11 +2497,35 @@ UI::DockedPaneState* UI::findDockedPane(WorkspacePane pane)
     return nullptr;
 }
 
+UI::DockedPaneState* UI::findDockedPaneWindow(HWND hwnd)
+{
+    for (auto& entry : dockedPanes_)
+    {
+        if (entry.windowHandle == hwnd)
+        {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 const UI::DockedPaneState* UI::findDockedPane(WorkspacePane pane) const
 {
     for (const auto& entry : dockedPanes_)
     {
         if (entry.pane == pane)
+        {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+const UI::DockedPaneState* UI::findDockedPaneWindow(HWND hwnd) const
+{
+    for (const auto& entry : dockedPanes_)
+    {
+        if (entry.windowHandle == hwnd)
         {
             return &entry;
         }
@@ -2355,10 +2554,10 @@ std::string UI::paneTitle(WorkspacePane pane) const
     switch (pane)
     {
     case WorkspacePane::Browser: return "Browser";
-    case WorkspacePane::ChannelRack: return "Channel Rack";
+    case WorkspacePane::ChannelRack: return "Channel Rack - Pattern " + std::to_string(workspace_.activePattern);
     case WorkspacePane::PianoRoll: return "Piano Roll";
     case WorkspacePane::Playlist: return "Playlist";
-    case WorkspacePane::Mixer: return "Mixer";
+    case WorkspacePane::Mixer: return "Mixer - " + (visibleState_.project.projectName.empty() ? std::string("Untitled Project") : visibleState_.project.projectName);
     case WorkspacePane::Plugin: return "Plugin";
     default: return "Pane";
     }
@@ -2409,54 +2608,127 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
 
 void UI::paintBrowserSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Browser", currentBrowserTabLabel());
-    drawSurfaceFrame(dc, rect, RGB(74, 90, 112));
+    drawSurfaceHeader(dc, rect, "Browser", "Docked browser");
 
-    int y = rect.top + 30;
-    for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
+    const int tabLeft = rect.left + 8;
+    const int tabTop = rect.top + kSurfaceHeaderHeight + 6;
+    const int clientWidth = static_cast<int>(rect.right - rect.left);
+    const int tabWidth = std::max(60, (clientWidth - 16 - ((kBrowserTabCount - 1) * 6)) / kBrowserTabCount);
+    const int contentTop = tabTop + kBrowserTabHeight + 10;
+    const int footerHeight = 28;
+
+    static constexpr const char* kBrowserTabs[] = {"Patterns", "Audio Clips", "Automation Clips"};
+    for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
     {
-        RECT itemRect{rect.left + 8, y, rect.right - 8, y + 34};
-        HBRUSH rowBrush = CreateSolidBrush(
-            static_cast<int>(index) == workspaceModel_.selectedBrowserIndex ? RGB(56, 68, 84) : RGB(34, 38, 45));
-        FillRect(dc, &itemRect, rowBrush);
-        DeleteObject(rowBrush);
-        y += 38;
+        RECT tabRect{
+            tabLeft + tabIndex * (tabWidth + 6),
+            tabTop,
+            tabLeft + tabIndex * (tabWidth + 6) + tabWidth,
+            tabTop + kBrowserTabHeight};
+        const bool selected = static_cast<std::size_t>(tabIndex) == workspace_.browserTabIndex;
+        HBRUSH tabBrush = CreateSolidBrush(selected ? RGB(88, 104, 124) : RGB(42, 48, 58));
+        FillRect(dc, &tabRect, tabBrush);
+        DeleteObject(tabBrush);
+        SetTextColor(dc, selected ? RGB(250, 250, 250) : RGB(178, 188, 202));
+        DrawTextA(dc, kBrowserTabs[tabIndex], -1, &tabRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    RECT textRect = rect;
-    textRect.top += 28;
-    SetTextColor(dc, RGB(228, 228, 228));
-    DrawTextA(dc, buildBrowserPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    int y = contentTop;
+    for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
+    {
+        if (y + kBrowserRowHeight > rect.bottom - footerHeight - 8)
+        {
+            break;
+        }
+
+        const BrowserEntry& entry = workspaceModel_.browserEntries[index];
+        RECT itemRect{rect.left + 8, y, rect.right - 8, y + kBrowserRowHeight};
+        const bool selected = static_cast<int>(index) == workspaceModel_.selectedBrowserIndex;
+        HBRUSH rowBrush = CreateSolidBrush(selected ? RGB(55, 67, 82) : RGB(34, 39, 46));
+        FillRect(dc, &itemRect, rowBrush);
+        DeleteObject(rowBrush);
+
+        RECT accentRect{itemRect.left, itemRect.top, itemRect.left + 4, itemRect.bottom};
+        HBRUSH accentBrush = CreateSolidBrush(entry.favorite ? RGB(235, 167, 72) : RGB(74, 84, 98));
+        FillRect(dc, &accentRect, accentBrush);
+        DeleteObject(accentBrush);
+
+        RECT categoryRect{itemRect.left + 12, itemRect.top + 4, itemRect.right - 12, itemRect.top + 17};
+        SetTextColor(dc, RGB(150, 166, 184));
+        DrawTextA(dc, entry.category.c_str(), -1, &categoryRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT labelRect{itemRect.left + 12, itemRect.top + 15, itemRect.right - 12, itemRect.top + 31};
+        SetTextColor(dc, RGB(236, 239, 244));
+        DrawTextA(dc, entry.label.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT subtitleRect{itemRect.left + 12, itemRect.top + 28, itemRect.right - 12, itemRect.bottom - 5};
+        SetTextColor(dc, RGB(169, 178, 192));
+        DrawTextA(dc, entry.subtitle.c_str(), -1, &subtitleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        y += kBrowserRowHeight + 6;
+    }
+
+    RECT footerRect{rect.left + 8, rect.bottom - footerHeight, rect.right - 8, rect.bottom - 8};
+    HBRUSH footerBrush = CreateSolidBrush(RGB(39, 45, 53));
+    FillRect(dc, &footerRect, footerBrush);
+    DeleteObject(footerBrush);
+    SetTextColor(dc, RGB(174, 186, 200));
+    DrawTextA(dc, browserDropTargetLabel().c_str(), -1, &footerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    drawSurfaceFrame(dc, rect, RGB(74, 90, 112));
 }
 
 void UI::paintChannelRackSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Channel Rack", "Patterns and channel states");
-    drawSurfaceFrame(dc, rect, RGB(90, 98, 72));
+    drawSurfaceHeader(dc, rect, "Channel Rack", "Detached window");
+    const int rowHeight = 40;
+    const int contentTop = rect.top + kSurfaceHeaderHeight + 8;
+    const int nameWidth = 180;
+    const int cellSize = 14;
 
-    int y = rect.top + 30;
+    int y = contentTop;
     for (std::size_t index = 0; index < workspaceModel_.patternLanes.size(); ++index)
     {
-        RECT rowRect{rect.left + 8, y, rect.right - 8, y + 26};
-        HBRUSH rowBrush = CreateSolidBrush(index == selectedTrackIndex_ ? RGB(68, 76, 62) : RGB(39, 43, 48));
-        FillRect(dc, &rowRect, rowBrush);
-        DeleteObject(rowBrush);
-        y += 30;
-        if (y > rect.bottom - 28)
+        if (y + rowHeight > rect.bottom - 8)
         {
             break;
         }
+
+        const PatternLaneState& lane = workspaceModel_.patternLanes[index];
+        RECT rowRect{rect.left + 8, y, rect.right - 8, y + rowHeight};
+        const bool selected = index == selectedTrackIndex_;
+        HBRUSH rowBrush = CreateSolidBrush(selected ? RGB(73, 82, 68) : RGB(39, 44, 49));
+        FillRect(dc, &rowRect, rowBrush);
+        DeleteObject(rowBrush);
+
+        RECT nameRect{rowRect.left + 12, rowRect.top + 4, rowRect.left + nameWidth, rowRect.top + 22};
+        SetTextColor(dc, selected ? RGB(247, 247, 247) : RGB(224, 228, 232));
+        DrawTextA(dc, lane.name.c_str(), -1, &nameRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT metaRect{rowRect.left + 12, rowRect.top + 21, rowRect.left + nameWidth, rowRect.bottom - 6};
+        const std::string metaText =
+            "Pattern " + std::to_string(workspace_.activePattern) + " | Notes " + std::to_string(lane.notes.size());
+        SetTextColor(dc, RGB(168, 179, 189));
+        DrawTextA(dc, metaText.c_str(), -1, &metaRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        for (int step = 0; step < kStepCount; ++step)
+        {
+            const int cellX = rowRect.left + nameWidth + 26 + step * (cellSize + 4);
+            RECT cellRect{cellX, rowRect.top + 9, cellX + cellSize, rowRect.top + 23};
+            const bool enabled = step < static_cast<int>(lane.steps.size()) && lane.steps[static_cast<std::size_t>(step)].enabled;
+            HBRUSH cellBrush = CreateSolidBrush(enabled ? RGB(235, 155, 49) : RGB(63, 70, 79));
+            FillRect(dc, &cellRect, cellBrush);
+            DeleteObject(cellBrush);
+        }
+
+        y += rowHeight + 6;
     }
 
-    RECT textRect = rect;
-    textRect.top += 28;
-    SetTextColor(dc, RGB(235, 235, 235));
-    DrawTextA(dc, buildChannelRackPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    drawSurfaceFrame(dc, rect, RGB(90, 98, 72));
 }
 
 void UI::paintStepSequencerSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Step Sequencer", "Click cells to toggle");
+    drawSurfaceHeader(dc, rect, "Step Sequencer", "Detached rack grid");
     drawSurfaceFrame(dc, rect, RGB(108, 88, 42));
 
     const int top = rect.top + 34;
@@ -2482,10 +2754,9 @@ void UI::paintStepSequencerSurface(HDC dc, const RECT& rect)
         }
     }
 
-    RECT textRect = rect;
-    textRect.top = top + laneCount * 24 + 8;
-    SetTextColor(dc, RGB(224, 224, 224));
-    DrawTextA(dc, buildStepSequencerPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    RECT helpRect{rect.left + 14, rect.bottom - 28, rect.right - 14, rect.bottom - 8};
+    SetTextColor(dc, RGB(212, 214, 218));
+    DrawTextA(dc, "Click cells to toggle steps for the selected channel.", -1, &helpRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
@@ -2565,20 +2836,62 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
 
 void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Playlist", workspace_.songMode ? "Song arrangement" : "Pattern preview");
-    const int laneHeight = 34;
-    const int timelineHeight = 28;
-    const int leftInset = 90;
+    const std::string subtitle =
+        std::string(workspace_.songMode ? "Song arrangement" : "Pattern preview") +
+        " | Zoom " + currentZoomLabel(false) +
+        " | Tool " + currentToolLabel(false);
+    drawSurfaceHeader(dc, rect, "Playlist - Arrangement", subtitle);
+
+    const int laneHeight = kPlaylistLaneHeight;
+    const int timelineTop = rect.top + kSurfaceHeaderHeight;
+    const int timelineHeight = kPlaylistTimelineHeight;
+    const int gridTop = timelineTop + timelineHeight;
+    const int leftInset = kPlaylistTrackHeaderWidth;
     const int columns = kPlaylistCellCount;
-    const int playlistWidth = static_cast<int>(rect.right) - leftInset;
-    const int columnWidth = std::max<int>(28, playlistWidth / columns);
+    const int laneCount = std::max<int>(10, static_cast<int>(workspaceModel_.patternLanes.size() + workspaceModel_.automationLanes.size()));
+    const int playlistWidth = std::max<int>(120, static_cast<int>(rect.right) - leftInset);
+    const int columnWidth = std::max<int>(24, playlistWidth / columns);
+
+    RECT trackHeaderRect{rect.left, gridTop, rect.left + leftInset, rect.bottom};
+    HBRUSH headerBrush = CreateSolidBrush(RGB(56, 63, 72));
+    FillRect(dc, &trackHeaderRect, headerBrush);
+    DeleteObject(headerBrush);
+
+    RECT timelineRect{rect.left + leftInset, timelineTop, rect.right, gridTop};
+    HBRUSH timelineBrush = CreateSolidBrush(RGB(53, 60, 69));
+    FillRect(dc, &timelineRect, timelineBrush);
+    DeleteObject(timelineBrush);
+
+    RECT gutterRect{rect.left, timelineTop, rect.left + leftInset, gridTop};
+    HBRUSH gutterBrush = CreateSolidBrush(RGB(49, 56, 66));
+    FillRect(dc, &gutterRect, gutterBrush);
+    DeleteObject(gutterBrush);
 
     HPEN majorPen = CreatePen(PS_SOLID, 1, RGB(74, 84, 98));
     HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(48, 54, 64));
 
-    for (int lane = 0; lane < (rect.bottom - timelineHeight) / laneHeight; ++lane)
+    for (int lane = 0; lane < laneCount; ++lane)
     {
-        const int y = rect.top + timelineHeight + (lane * laneHeight);
+        const int y = gridTop + (lane * laneHeight);
+        RECT laneRect{rect.left + leftInset, y, rect.right, y + laneHeight};
+        HBRUSH laneBrush = CreateSolidBrush((lane % 2) == 0 ? RGB(37, 42, 50) : RGB(33, 38, 46));
+        FillRect(dc, &laneRect, laneBrush);
+        DeleteObject(laneBrush);
+
+        RECT labelRect{rect.left + 12, y + 3, rect.left + leftInset - 12, y + laneHeight - 3};
+        const bool isTrackLane = lane < static_cast<int>(workspaceModel_.patternLanes.size());
+        const int automationIndex = lane - static_cast<int>(workspaceModel_.patternLanes.size());
+        const bool isAutomationLane =
+            !isTrackLane && automationIndex >= 0 && automationIndex < static_cast<int>(workspaceModel_.automationLanes.size());
+        const std::string laneName =
+            isTrackLane
+                ? workspaceModel_.patternLanes[static_cast<std::size_t>(lane)].name
+                : (isAutomationLane
+                       ? ("Automation " + workspaceModel_.automationLanes[static_cast<std::size_t>(automationIndex)].target)
+                       : ("Track " + std::to_string(lane + 1)));
+        SetTextColor(dc, isAutomationLane ? RGB(226, 165, 194) : RGB(215, 221, 228));
+        DrawTextA(dc, laneName.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
         SelectObject(dc, minorPen);
         MoveToEx(dc, rect.left, y, nullptr);
         LineTo(dc, rect.right, y);
@@ -2588,8 +2901,16 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     {
         const int x = rect.left + leftInset + (col * columnWidth);
         SelectObject(dc, (col % 4 == 0) ? majorPen : minorPen);
-        MoveToEx(dc, x, rect.top, nullptr);
+        MoveToEx(dc, x, timelineTop, nullptr);
         LineTo(dc, x, rect.bottom);
+
+        if (col < columns)
+        {
+            RECT beatRect{x + 4, timelineTop + 5, x + 32, gridTop - 4};
+            SetTextColor(dc, (col % 4 == 0) ? RGB(222, 228, 236) : RGB(137, 148, 162));
+            const std::string beatLabel = std::to_string(col + 1);
+            DrawTextA(dc, beatLabel.c_str(), -1, &beatRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 
     DeleteObject(majorPen);
@@ -2600,60 +2921,78 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         const int x = rect.left + leftInset + (marker.timelineCell * columnWidth);
         HPEN markerPen = CreatePen(PS_SOLID, 1, RGB(255, 207, 84));
         HGDIOBJ oldPen = SelectObject(dc, markerPen);
-        MoveToEx(dc, x, rect.top, nullptr);
+        MoveToEx(dc, x, timelineTop, nullptr);
         LineTo(dc, x, rect.bottom);
         SelectObject(dc, oldPen);
         DeleteObject(markerPen);
 
-        RECT markerRect{x + 2, rect.top + 2, x + 70, rect.top + 18};
+        RECT markerRect{x + 4, timelineTop + 2, x + 72, timelineTop + 18};
         SetTextColor(dc, RGB(255, 222, 128));
         DrawTextA(dc, marker.name.c_str(), -1, &markerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
     rebuildPlaylistVisuals(rect);
 
-    HBRUSH clipBrush = CreateSolidBrush(RGB(94, 170, 255));
-    HBRUSH selectedBrush = CreateSolidBrush(RGB(145, 214, 255));
     for (const auto& clip : interactionState_.playlistClipVisuals)
     {
-        if (clip.clipId >= 4000)
+        if (clip.automation)
         {
             continue;
         }
+
         RECT clipRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
-        FillRect(dc, &clipRect, clip.selected ? selectedBrush : clipBrush);
+        const bool isAudioClip = clip.clipType == "Audio";
+        HBRUSH clipBrush = CreateSolidBrush(
+            clip.selected
+                ? (isAudioClip ? RGB(150, 192, 128) : RGB(139, 205, 244))
+                : (isAudioClip ? RGB(98, 138, 81) : RGB(79, 156, 210)));
+        FillRect(dc, &clipRect, clipBrush);
+        DeleteObject(clipBrush);
         RECT leftHandle{clipRect.left, clipRect.top, clipRect.left + 6, clipRect.bottom};
         RECT rightHandle{clipRect.right - 6, clipRect.top, clipRect.right, clipRect.bottom};
-        HBRUSH handleBrush = CreateSolidBrush(RGB(220, 240, 255));
+        HBRUSH handleBrush = CreateSolidBrush(isAudioClip ? RGB(220, 235, 207) : RGB(220, 240, 255));
         FillRect(dc, &leftHandle, handleBrush);
         FillRect(dc, &rightHandle, handleBrush);
         DeleteObject(handleBrush);
-        SetTextColor(dc, RGB(20, 20, 26));
-        DrawTextA(dc, ("Clip " + std::to_string(clip.clipId)).c_str(), -1, &clipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-    DeleteObject(clipBrush);
-    DeleteObject(selectedBrush);
 
-    HBRUSH automationBrush = CreateSolidBrush(RGB(228, 110, 168));
-    HBRUSH automationSelectedBrush = CreateSolidBrush(RGB(255, 160, 205));
+        RECT clipLabelRect{clipRect.left + 10, clipRect.top + 2, clipRect.right - 8, clipRect.bottom - 2};
+        SetTextColor(dc, RGB(18, 21, 28));
+        DrawTextA( dc, clip.label.c_str(), -1, &clipLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
     HPEN automationPen = CreatePen(PS_SOLID, 2, RGB(255, 216, 238));
-    for (const auto& automation : workspaceModel_.automationLanes)
+    for (const auto& clip : interactionState_.playlistClipVisuals)
     {
-        const int clipX = rect.left + leftInset + (automation.startCell * columnWidth);
-        const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
-        RECT automationRect{clipX, clipY, clipX + std::max(42, automation.lengthCells * columnWidth - 6), clipY + laneHeight - 10};
-        FillRect(dc, &automationRect, automation.selected ? automationSelectedBrush : automationBrush);
+        if (!clip.automation)
+        {
+            continue;
+        }
+
+        auto automationIt = std::find_if(
+            workspaceModel_.automationLanes.begin(),
+            workspaceModel_.automationLanes.end(),
+            [&](const AutomationLaneState& automation) { return automation.clipId == clip.clipId; });
+        if (automationIt == workspaceModel_.automationLanes.end())
+        {
+            continue;
+        }
+
+        RECT automationRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
+        HBRUSH automationBrush = CreateSolidBrush(automationIt->selected ? RGB(255, 160, 205) : RGB(228, 110, 168));
+        FillRect(dc, &automationRect, automationBrush);
+        DeleteObject(automationBrush);
+
         RECT rightHandle{automationRect.right - 6, automationRect.top, automationRect.right, automationRect.bottom};
         HBRUSH handleBrush = CreateSolidBrush(RGB(255, 232, 243));
         FillRect(dc, &rightHandle, handleBrush);
         DeleteObject(handleBrush);
 
         HGDIOBJ oldPen = SelectObject(dc, automationPen);
-        const int pointCount = static_cast<int>(automation.values.size());
+        const int pointCount = static_cast<int>(automationIt->values.size());
         for (int point = 0; point < pointCount; ++point)
         {
             const int pointX = automationRect.left + ((automationRect.right - automationRect.left - 6) * point) / std::max(1, pointCount - 1) + 3;
-            const int pointY = automationRect.bottom - 4 - ((automationRect.bottom - automationRect.top - 8) * automation.values[static_cast<std::size_t>(point)]) / 100;
+            const int pointY = automationRect.bottom - 4 - ((automationRect.bottom - automationRect.top - 8) * automationIt->values[static_cast<std::size_t>(point)]) / 100;
             if (point == 0)
             {
                 MoveToEx(dc, pointX, pointY, nullptr);
@@ -2667,10 +3006,8 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 
         RECT labelRect{automationRect.left + 4, automationRect.top + 2, automationRect.right - 4, automationRect.top + 18};
         SetTextColor(dc, RGB(40, 22, 34));
-        DrawTextA(dc, automation.target.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextA(dc, automationIt->target.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    DeleteObject(automationBrush);
-    DeleteObject(automationSelectedBrush);
     DeleteObject(automationPen);
 
     if (interactionState_.marqueeActive && interactionState_.activeSurface == SurfaceKind::Playlist)
@@ -2684,11 +3021,6 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         DeleteObject(marqueePen);
     }
 
-    RECT textRect = rect;
-    textRect.left += 6;
-    textRect.top += 30;
-    SetTextColor(dc, RGB(235, 235, 235));
-    DrawTextA(dc, buildPlaylistPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP);
     drawSurfaceFrame(dc, rect, RGB(84, 96, 116));
 }
 
@@ -2769,10 +3101,12 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
 
     if (kind == SurfaceKind::Playlist)
     {
+        bool hitClip = false;
         interactionState_.draggingClip = false;
         interactionState_.resizingClipLeft = false;
         interactionState_.resizingClipRight = false;
         interactionState_.editingAutomationPoint = false;
+        interactionState_.selectedClipId = 0;
         interactionState_.selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
         interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(-1);
         for (auto& automation : workspaceModel_.automationLanes)
@@ -2788,6 +3122,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             clip.selected = hit;
             if (hit)
             {
+                hitClip = true;
                 interactionState_.selectedClipId = clip.clipId;
                 const bool leftEdge = x <= (clip.rect.x + 6);
                 const bool rightEdge = x >= (clip.rect.x + clip.rect.width - 6);
@@ -2825,7 +3160,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
                 }
             }
         }
-        if (!interactionState_.draggingClip)
+        if (!hitClip && !interactionState_.editingAutomationPoint)
         {
             interactionState_.marqueeActive = true;
             interactionState_.marqueeRect = RECT{x, y, x, y};
@@ -2833,6 +3168,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     }
     else if (kind == SurfaceKind::PianoRoll)
     {
+        bool hitNote = false;
         interactionState_.draggingNote = false;
         interactionState_.resizingNote = false;
         interactionState_.selectedNoteIndex = static_cast<std::size_t>(-1);
@@ -2845,12 +3181,13 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             note.selected = hit;
             if (hit)
             {
+                hitNote = true;
                 interactionState_.resizingNote = x >= (note.rect.x + note.rect.width - 6);
                 interactionState_.draggingNote = !interactionState_.resizingNote;
                 interactionState_.selectedNoteIndex = index;
             }
         }
-        if (!interactionState_.draggingNote)
+        if (!hitNote)
         {
             interactionState_.marqueeActive = true;
             interactionState_.marqueeRect = RECT{x, y, x, y};
@@ -2858,11 +3195,36 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     }
     else if (kind == SurfaceKind::Browser)
     {
-        interactionState_.browserDragActive = true;
-        const int browserIndex = std::max(0, (y - 30) / 38);
-        interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(browserIndex);
-        workspaceModel_.selectedBrowserIndex =
-            clampValue(browserIndex, 0, std::max(0, static_cast<int>(workspaceModel_.browserEntries.size()) - 1));
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const int tabTop = kSurfaceHeaderHeight + 6;
+        const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
+        const int tabWidth = std::max(60, (clientWidth - 16 - ((kBrowserTabCount - 1) * 6)) / kBrowserTabCount);
+        for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
+        {
+            const int tabLeft = 8 + tabIndex * (tabWidth + 6);
+            if (x >= tabLeft && x <= (tabLeft + tabWidth) && y >= tabTop && y <= (tabTop + kBrowserTabHeight))
+            {
+                workspace_.browserTabIndex = static_cast<std::size_t>(tabIndex);
+                workspaceModel_.selectedBrowserIndex = 0;
+                rebuildBrowserEntries();
+                interactionState_.browserDragActive = false;
+                interactionState_.mouseDown = false;
+                ReleaseCapture();
+                invalidateSurface(hwnd);
+                return;
+            }
+        }
+
+        interactionState_.browserDragActive = false;
+        const int browserIndex = std::max(0, (y - (tabTop + kBrowserTabHeight + 10)) / (kBrowserRowHeight + 6));
+        if (!workspaceModel_.browserEntries.empty() &&
+            browserIndex < static_cast<int>(workspaceModel_.browserEntries.size()))
+        {
+            interactionState_.browserDragActive = true;
+            interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(browserIndex);
+            workspaceModel_.selectedBrowserIndex = browserIndex;
+        }
     }
     else if (kind == SurfaceKind::ChannelRack)
     {
@@ -2947,8 +3309,8 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int laneHeight = 34;
-        const int timelineHeight = 28;
+        const int laneHeight = kPlaylistLaneHeight;
+        const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
         auto& automation = workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex];
         const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
         const int normalized = clampValue(100 - ((y - clipY) * 100) / std::max<int>(10, laneHeight - 10), 0, 100);
@@ -3027,7 +3389,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     }
 
     if (kind == SurfaceKind::PianoRoll && !workspaceModel_.patternLanes.empty() &&
-        !interactionState_.draggingNote && !interactionState_.marqueeActive)
+        !interactionState_.draggingNote && !interactionState_.resizingNote &&
+        !interactionState_.marqueeActive && interactionState_.selectedNoteIndex == static_cast<std::size_t>(-1))
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
@@ -3102,12 +3465,16 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         {
             RECT clientRect{};
             GetClientRect(hwnd, &clientRect);
-            const int laneHeight = 34;
-            const int timelineHeight = 28;
-            const int leftInset = 90;
+            const int laneHeight = kPlaylistLaneHeight;
+            const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+            const int leftInset = kPlaylistTrackHeaderWidth;
             const int clientWidth = static_cast<int>(clientRect.right);
-            const int columnWidth = std::max<int>(28, std::max<int>(1, clientWidth - leftInset) / kPlaylistCellCount);
+            const int columnWidth = std::max<int>(24, std::max<int>(1, clientWidth - leftInset) / kPlaylistCellCount);
             const int targetLane = std::max<int>(0, (clipIt->rect.y - timelineHeight) / laneHeight);
+            const int targetStartCell =
+                clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
+            const int targetLengthCells =
+                std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
 
             if (clipIt->clipId >= 4000)
             {
@@ -3116,8 +3483,8 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                     if (automation.clipId == clipIt->clipId)
                     {
                         automation.lane = targetLane;
-                        automation.startCell = clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
-                        automation.lengthCells = std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
+                        automation.startCell = targetStartCell;
+                        automation.lengthCells = targetLengthCells;
                         automation.selected = true;
                         break;
                     }
@@ -3126,14 +3493,14 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             else
             {
                 const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
-                const double startTime = std::max(0.0, static_cast<double>(clipIt->rect.x - leftInset) / 14.0);
+                const double startTime = static_cast<double>(targetStartCell) / 2.0;
                 for (auto& block : workspaceModel_.playlistBlocks)
                 {
                     if (block.clipId == clipIt->clipId)
                     {
                         block.lane = safeLane;
-                        block.startCell = clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
-                        block.lengthCells = std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
+                        block.startCell = targetStartCell;
+                        block.lengthCells = targetLengthCells;
                         break;
                     }
                 }
@@ -3195,16 +3562,18 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
 void UI::rebuildPlaylistVisuals(const RECT& rect)
 {
     interactionState_.playlistClipVisuals.clear();
-    const int timelineHeight = 28;
-    const int laneHeight = 34;
-    const int leftInset = 90;
-    const int columnWidth = std::max<int>(28, (static_cast<int>(rect.right) - leftInset) / kPlaylistCellCount);
+    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+    const int laneHeight = kPlaylistLaneHeight;
+    const int leftInset = kPlaylistTrackHeaderWidth;
+    const int columnWidth = std::max<int>(24, (static_cast<int>(rect.right) - leftInset) / kPlaylistCellCount);
 
     for (const auto& block : workspaceModel_.playlistBlocks)
     {
         UiClipVisual visual{};
         visual.clipId = block.clipId;
         visual.trackId = block.trackId;
+        visual.label = block.label;
+        visual.clipType = block.clipType;
         visual.rect.x = leftInset + (block.startCell * columnWidth);
         visual.rect.y = timelineHeight + 6 + (block.lane * laneHeight);
         visual.rect.width = std::max(42, block.lengthCells * columnWidth - 6);
@@ -3223,6 +3592,8 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
         UiClipVisual visual{};
         visual.clipId = automation.clipId;
         visual.trackId = 0;
+        visual.label = automation.target;
+        visual.clipType = "Automation";
         visual.rect.x = leftInset + (automation.startCell * columnWidth);
         visual.rect.y = timelineHeight + 6 + (automation.lane * laneHeight);
         visual.rect.width = std::max(42, automation.lengthCells * columnWidth - 6);
@@ -3283,6 +3654,7 @@ void UI::setStaticText(HWND control, const std::string& text) const
 
 void UI::syncWorkspaceModel()
 {
+    workspace_.browserTabIndex = std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1);
     ensurePatternBank();
     rebuildPatternLanes();
     rebuildPlaylistBlocks();
@@ -3333,40 +3705,76 @@ void UI::rebuildBrowserEntries()
         workspaceModel_.browserEntries.push_back(BrowserEntry{std::move(category), std::move(label), std::move(subtitle), favorite});
     };
 
-    switch (std::min<std::size_t>(workspace_.browserTabIndex, 4))
+    switch (std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1))
     {
     case 0:
-        addEntry("Packs", "Drums > Punch Kit", "Kick, snare, clap, hats", true);
-        addEntry("Packs", "Loops > Neon House", "128 BPM tonal loops");
-        addEntry("Packs", "Vocals > Hooks", "Chops and one-shots");
-        addEntry("Packs", "FX > Risers", "Transitions and impacts");
+        for (const auto& pattern : workspaceModel_.patterns)
+        {
+            int laneCountWithSteps = 0;
+            for (const auto& lane : pattern.lanes)
+            {
+                if (std::any_of(
+                        lane.steps.begin(),
+                        lane.steps.end(),
+                        [](const ChannelStepState& step) { return step.enabled; }))
+                {
+                    ++laneCountWithSteps;
+                }
+            }
+
+            addEntry(
+                "Pattern",
+                pattern.name,
+                std::to_string(pattern.lanes.size()) + " channels | " +
+                    std::to_string(laneCountWithSteps) + " active step lanes | " +
+                    std::to_string(pattern.lengthInBars) + " bars",
+                pattern.patternNumber == workspace_.activePattern);
+        }
         break;
     case 1:
-        addEntry("Plugins", "Sampler", "Multi-layer sample channel", true);
-        addEntry("Plugins", "Flex Lead", "Bright synth rack");
-        addEntry("Plugins", "Bass Engine", "Sub and reese presets");
-        addEntry("Effects", "Parametric EQ", "7-band corrective EQ", true);
-        addEntry("Effects", "Compressor", "Glue and punch");
-        addEntry("Effects", "Convolution Reverb", "Space designer");
+    {
+        bool addedAudio = false;
+        for (const auto& block : workspaceModel_.playlistBlocks)
+        {
+            if (block.clipType != "Audio")
+            {
+                continue;
+            }
+
+            addedAudio = true;
+            addEntry(
+                "Audio",
+                block.label,
+                "Playlist lane " + std::to_string(block.lane + 1) + " | Start " +
+                    std::to_string(block.startCell + 1) + " | Length " + std::to_string(block.lengthCells) + " cells",
+                block.selected);
+        }
+
+        if (!addedAudio)
+        {
+            addEntry("Audio", "Lead Vox Chop", "Preview sample ready for playlist", true);
+            addEntry("Audio", "Impact Downlifter", "Transition FX clip");
+            addEntry("Audio", "Analog Bass One-Shot", "Sampler-ready source clip");
+        }
         break;
-    case 2:
-        addEntry("Project", "Pattern " + std::to_string(workspace_.activePattern), "Current working pattern", true);
-        addEntry("Project", "Pattern Bank", std::to_string(workspaceModel_.patterns.size()) + " independent patterns");
-        addEntry("Project", "Playlist Arrangement", std::to_string(workspaceModel_.playlistBlocks.size()) + " clips placed");
-        addEntry("Project", "Mixer Presets", std::to_string(workspaceModel_.mixerStrips.size()) + " active inserts");
-        addEntry("Project", "Automation Clips", std::to_string(workspaceModel_.automationLanes.size()) + " lanes linked");
-        break;
-    case 3:
-        addEntry("Automation", "Volume Envelope", "Master ducking macro", true);
-        addEntry("Automation", "Filter Cutoff", "Lead opening sweep");
-        addEntry("Automation", "Pan Motion", "Stereo motion curve");
-        addEntry("Automation", "Gross Macro", "Performance automation");
-        break;
+    }
     default:
-        addEntry("Disk", visibleState_.document.sessionPath.empty() ? "Unsaved Session" : visibleState_.document.sessionPath, "Project root");
-        addEntry("Disk", "Audio Renders", "Bounces and stems");
-        addEntry("Disk", "Recorded Takes", "Playlist recordings");
-        addEntry("Disk", "Presets", "User channel states");
+        for (const auto& automation : workspaceModel_.automationLanes)
+        {
+            addEntry(
+                "Automation",
+                automation.target,
+                "Lane " + std::to_string(automation.lane + 1) + " | Start " +
+                    std::to_string(automation.startCell + 1) + " | " +
+                    std::to_string(automation.values.size()) + " points",
+                automation.selected);
+        }
+
+        if (workspaceModel_.automationLanes.empty())
+        {
+            addEntry("Automation", "Master Volume", "Fallback envelope lane", true);
+            addEntry("Automation", "Filter Cutoff", "Sweep automation clip");
+        }
         break;
     }
 }
@@ -3598,19 +4006,19 @@ void UI::ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIn
 
 void UI::drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const
 {
-    RECT headerRect{rect.left, rect.top, rect.right, rect.top + 22};
-    HBRUSH headerBrush = CreateSolidBrush(RGB(36, 40, 48));
+    RECT headerRect{rect.left, rect.top, rect.right, rect.top + kSurfaceHeaderHeight};
+    HBRUSH headerBrush = CreateSolidBrush(RGB(43, 49, 58));
     FillRect(dc, &headerRect, headerBrush);
     DeleteObject(headerBrush);
 
-    RECT titleRect{rect.left + 8, rect.top + 3, rect.right - 8, rect.top + 20};
+    RECT titleRect{rect.left + 8, rect.top + 3, rect.right - 8, rect.top + kSurfaceHeaderHeight - 2};
     SetTextColor(dc, RGB(244, 244, 244));
     DrawTextA(dc, title.c_str(), -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     if (!subtitle.empty())
     {
-        RECT subtitleRect{rect.right - 240, rect.top + 3, rect.right - 8, rect.top + 20};
-        SetTextColor(dc, RGB(170, 178, 190));
+        RECT subtitleRect{rect.right - 280, rect.top + 3, rect.right - 8, rect.top + kSurfaceHeaderHeight - 2};
+        SetTextColor(dc, RGB(173, 181, 193));
         DrawTextA(dc, subtitle.c_str(), -1, &subtitleRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -3636,4 +4044,3 @@ std::string UI::browserDropTargetLabel() const
     const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
     return entry.label + " -> Rack / Playlist / Mixer";
 }
-
