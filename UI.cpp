@@ -295,6 +295,28 @@ void UI::createControls()
     pluginMenuButton_ = CreateWindowA("BUTTON", "v", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonMenuPlugin), hInstance_, nullptr);
     pluginPanel_ = CreateWindowA("STATIC", "", panelStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlugin), hInstance_, nullptr);
 
+    if (engineStartButton_ == nullptr || engineStopButton_ == nullptr || playButton_ == nullptr ||
+        stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr ||
+        tempoDownButton_ == nullptr || tempoUpButton_ == nullptr || patternPrevButton_ == nullptr ||
+        patternNextButton_ == nullptr || snapPrevButton_ == nullptr || snapNextButton_ == nullptr ||
+        browserButton_ == nullptr || channelRackButton_ == nullptr || pianoRollButton_ == nullptr ||
+        playlistButton_ == nullptr || mixerButton_ == nullptr || pluginButton_ == nullptr ||
+        addTrackButton_ == nullptr || addBusButton_ == nullptr || addClipButton_ == nullptr ||
+        undoButton_ == nullptr || redoButton_ == nullptr || saveProjectButton_ == nullptr ||
+        loadProjectButton_ == nullptr || prevTrackButton_ == nullptr || nextTrackButton_ == nullptr ||
+        rebuildGraphButton_ == nullptr || renderOfflineButton_ == nullptr || automationCheckbox_ == nullptr ||
+        pdcCheckbox_ == nullptr || anticipativeCheckbox_ == nullptr || statusLabel_ == nullptr ||
+        tempoLabel_ == nullptr || patternLabel_ == nullptr || snapLabel_ == nullptr ||
+        systemLabel_ == nullptr || hintsLabel_ == nullptr || projectSummaryLabel_ == nullptr ||
+        documentLabel_ == nullptr || selectionLabel_ == nullptr || browserMenuButton_ == nullptr ||
+        browserPanel_ == nullptr || channelRackMenuButton_ == nullptr || channelRackPanel_ == nullptr ||
+        stepSequencerPanel_ == nullptr || pianoRollMenuButton_ == nullptr || pianoRollPanel_ == nullptr ||
+        playlistMenuButton_ == nullptr || playlistPanel_ == nullptr || mixerMenuButton_ == nullptr ||
+        mixerPanel_ == nullptr || pluginMenuButton_ == nullptr || pluginPanel_ == nullptr)
+    {
+        throw UiInitializationException("No se pudo crear uno o mas controles de la interfaz.");
+    }
+
     layoutControls();
 }
 
@@ -904,6 +926,16 @@ void UI::requestAddClip()
     engine_.postCommand(command);
 }
 
+void UI::requestNewProject()
+{
+    AudioEngine::EngineCommand command{};
+    command.type = AudioEngine::CommandType::NewProject;
+    command.textValue = "Untitled Project";
+    engine_.postCommand(command);
+    workspace_.activePattern = 1;
+    selectedTrackIndex_ = 0;
+}
+
 void UI::requestUndo()
 {
     engine_.postCommand({AudioEngine::CommandType::UndoEdit});
@@ -1023,9 +1055,12 @@ void UI::handleCommand(WORD commandId)
         togglePane(WorkspacePane::Plugin);
         break;
 
+    case IdMenuFileNew:
+        requestNewProject();
+        break;
+
     case IdButtonAddTrack:
     case IdMenuAddTrack:
-    case IdMenuFileNew:
         requestAddTrack();
         break;
 
@@ -1226,6 +1261,15 @@ void UI::cycleSnap(int delta)
 
 void UI::togglePane(WorkspacePane pane)
 {
+    const auto visibleWorkspacePanelCount = [this]() -> int
+    {
+        return (workspace_.channelRackVisible ? 1 : 0) +
+               (workspace_.pianoRollVisible ? 1 : 0) +
+               (workspace_.playlistVisible ? 1 : 0) +
+               (workspace_.mixerVisible ? 1 : 0) +
+               (workspace_.pluginVisible ? 1 : 0);
+    };
+
     switch (pane)
     {
     case WorkspacePane::Browser:
@@ -1233,22 +1277,42 @@ void UI::togglePane(WorkspacePane pane)
         break;
 
     case WorkspacePane::ChannelRack:
+        if (workspace_.channelRackVisible && visibleWorkspacePanelCount() == 1)
+        {
+            return;
+        }
         workspace_.channelRackVisible = !workspace_.channelRackVisible;
         break;
 
     case WorkspacePane::PianoRoll:
+        if (workspace_.pianoRollVisible && visibleWorkspacePanelCount() == 1)
+        {
+            return;
+        }
         workspace_.pianoRollVisible = !workspace_.pianoRollVisible;
         break;
 
     case WorkspacePane::Playlist:
+        if (workspace_.playlistVisible && visibleWorkspacePanelCount() == 1)
+        {
+            return;
+        }
         workspace_.playlistVisible = !workspace_.playlistVisible;
         break;
 
     case WorkspacePane::Mixer:
+        if (workspace_.mixerVisible && visibleWorkspacePanelCount() == 1)
+        {
+            return;
+        }
         workspace_.mixerVisible = !workspace_.mixerVisible;
         break;
 
     case WorkspacePane::Plugin:
+        if (workspace_.pluginVisible && visibleWorkspacePanelCount() == 1)
+        {
+            return;
+        }
         workspace_.pluginVisible = !workspace_.pluginVisible;
         break;
     }
@@ -1267,3 +1331,4 @@ void UI::setStaticText(HWND control, const std::string& text) const
         SetWindowTextA(control, text.c_str());
     }
 }
+
