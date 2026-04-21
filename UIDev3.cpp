@@ -555,10 +555,10 @@ void UI::paintMainBackground(HDC dc) const
     RECT workspaceRect{clientRect.left, workspaceTop, clientRect.right, clientRect.bottom};
 
     fillRectColor(dc, menuRect, RGB(56, 64, 67));
-    fillRectColor(dc, toolbarRect, RGB(93, 111, 113));
+    fillRectColor(dc, toolbarRect, kFlToolbarBase);
     fillRectColor(dc, workspaceRect, blendColor(kUiPetrol, kUiShadow, 1, 4));
     drawHorizontalLine(dc, clientRect.left, clientRect.right, menuStripHeight - 1, RGB(73, 82, 86));
-    drawHorizontalLine(dc, clientRect.left, clientRect.right, topPanelY + topPanelHeight - 1, kUiLineSoft);
+    drawHorizontalLine(dc, clientRect.left, clientRect.right, topPanelY + topPanelHeight - 1, kFlToolbarBorder);
 
     if (workspace_.browserVisible)
     {
@@ -580,7 +580,7 @@ void UI::paintMainBackground(HDC dc) const
     const int patternClusterWidth = 154;
     const int clientRight = static_cast<int>(clientRect.right);
     const int patternClusterLimit = clientRight - kOuterPadding - patternClusterWidth - 20;
-    const int patternClusterDesired = std::max(transportX + 320, clientRight - 460);
+    const int patternClusterDesired = std::max(transportX + 372, clientRight - 460);
     const int patternClusterX = std::min(patternClusterLimit, patternClusterDesired);
 
     RECT timeDisplayRect{timePanelX, timePanelY, timePanelX + timePanelWidth, timePanelY + displayHeight};
@@ -689,9 +689,32 @@ void UI::paintMainBackground(HDC dc) const
     DeleteObject(spectrumPen);
     DeleteObject(spectrumBrush);
 
-    RECT tempoFieldRect{transportX + 198, transportY + 4, transportX + 288, transportY + 42};
-    fillRectColor(dc, tempoFieldRect, RGB(208, 222, 227));
-    drawSurfaceFrame(dc, tempoFieldRect, RGB(184, 196, 201));
+    RECT transportShellRect{transportX + 58, transportY + 4, transportX + 158, transportY + 44};
+    HBRUSH transportShellBrush = CreateSolidBrush(kFlPanelDark);
+    HPEN transportShellPen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
+    HGDIOBJ oldTransportBrush = SelectObject(dc, transportShellBrush);
+    HGDIOBJ oldTransportPen = SelectObject(dc, transportShellPen);
+    RoundRect(dc, transportShellRect.left, transportShellRect.top, transportShellRect.right, transportShellRect.bottom, 18, 18);
+    SelectObject(dc, oldTransportPen);
+    SelectObject(dc, oldTransportBrush);
+    DeleteObject(transportShellPen);
+    DeleteObject(transportShellBrush);
+
+    RECT tempoFieldRect{
+        transportX + 208,
+        transportY + 4,
+        transportX + 208 + kTempoDisplayWidth,
+        transportY + 4 + kTempoDisplayHeight};
+    fillRectColor(dc, tempoFieldRect, kFlLcdFill);
+    drawSurfaceFrame(dc, tempoFieldRect, kFlLcdBorder);
+
+    RECT chronoFieldRect{
+        tempoFieldRect.right + kChronometerGap,
+        tempoFieldRect.top,
+        tempoFieldRect.right + kChronometerGap + kChronometerWidth,
+        tempoFieldRect.top + kChronometerHeight};
+    fillRectColor(dc, chronoFieldRect, workspace_.chronometerEnabled ? RGB(235, 175, 104) : RGB(107, 115, 118));
+    drawSurfaceFrame(dc, chronoFieldRect, workspace_.chronometerEnabled ? RGB(193, 118, 53) : kFlToolbarBorder);
 
     RECT patternFieldRect{patternClusterX + 34, transportY + 2, patternClusterX + 90, transportY + 42};
     fillRectColor(dc, patternFieldRect, RGB(209, 222, 228));
@@ -700,20 +723,50 @@ void UI::paintMainBackground(HDC dc) const
     const int modeBarLeft = transportX - 2;
     const int modeBarTop = transportY + 68;
     const int modeBarWidth = std::max(160, std::min(332, patternClusterX - transportX - 40));
-    const int modeKnobPosition = workspace_.songMode ? static_cast<int>(modeBarWidth * 0.67) : static_cast<int>(modeBarWidth * 0.15);
+    const double playbackProgress = getPlaybackProgressNormalized();
+    const bool transportRunning = visibleState_.transportState == AudioEngine::TransportState::Playing;
+    const double beatPosition = std::fmod(std::max(0.0, visibleState_.timelineSeconds) * (workspace_.tempoBpm / 60.0), 1.0);
+    const int pulseStrength =
+        workspace_.chronometerEnabled && transportRunning && beatPosition < 0.15
+            ? clampValue(static_cast<int>(((0.15 - beatPosition) / 0.15) * 10.0), 0, 10)
+            : 0;
     RECT modeLineRect{modeBarLeft + 18, modeBarTop + 7, modeBarLeft + modeBarWidth, modeBarTop + 9};
-    fillRectColor(dc, modeLineRect, RGB(123, 138, 143));
-    RECT modeFillRect{modeLineRect.left, modeLineRect.top, modeLineRect.left + modeKnobPosition, modeLineRect.bottom};
-    fillRectColor(dc, modeFillRect, workspace_.songMode ? RGB(98, 109, 113) : RGB(240, 162, 75));
+    fillRectColor(dc, modeLineRect, RGB(128, 137, 141));
+    const int knobCenterX =
+        modeLineRect.left +
+        clampValue(
+            static_cast<int>(std::round(playbackProgress * static_cast<double>(modeLineRect.right - modeLineRect.left))),
+            0,
+            modeLineRect.right - modeLineRect.left);
+    RECT modeFillRect{
+        modeLineRect.left,
+        modeLineRect.top,
+        knobCenterX,
+        modeLineRect.bottom};
+    fillRectColor(
+        dc,
+        modeFillRect,
+        workspace_.songMode
+            ? blendColor(kFlToolbarBase, RGB(160, 171, 175), pulseStrength, 10)
+            : blendColor(kFlOrangeDeep, RGB(255, 202, 126), pulseStrength, 10));
 
     RECT knobRect{
-        modeLineRect.left + modeKnobPosition - 9,
+        knobCenterX - 9,
         modeBarTop,
-        modeLineRect.left + modeKnobPosition + 9,
+        knobCenterX + 9,
         modeBarTop + 18};
-    drawFilledCircle(dc, knobRect, RGB(59, 68, 73), RGB(46, 53, 58));
+    drawFilledCircle(
+        dc,
+        knobRect,
+        blendColor(kFlPanelDark, RGB(120, 129, 133), pulseStrength, 10),
+        kFlPanelDarker);
     RECT knobHighlight{knobRect.left + 6, knobRect.top + 4, knobRect.left + 10, knobRect.top + 12};
-    fillRectColor(dc, knobHighlight, RGB(209, 138, 62));
+    fillRectColor(
+        dc,
+        knobHighlight,
+        workspace_.songMode
+            ? blendColor(kFlToolbarBase, RGB(214, 221, 223), pulseStrength, 10)
+            : blendColor(kFlOrangeDeep, RGB(255, 205, 142), pulseStrength, 10));
 }
 
 HBRUSH UI::resolveLabelBrush(HWND control, HDC dc) const
@@ -792,6 +845,12 @@ bool UI::isControlActive(WORD controlId) const
     case IdButtonRecord:
         return workspace_.recordArmed;
 
+    case IdButtonTempoDisplay:
+        return tempoDragActive_ || tempoEditHwnd_ != nullptr;
+
+    case IdButtonChronometer:
+        return workspace_.chronometerEnabled;
+
     case IdButtonPatSong:
         return workspace_.songMode;
 
@@ -863,6 +922,9 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
     static HFONT menuFont = CreateFontA(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     static HFONT moduleFont = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     static HFONT smallBoldFont = CreateFontA(12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT lcdFont = CreateFontA(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT lcdFineFont = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT chronoFont = CreateFontA(11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     HGDIOBJ oldFont = nullptr;
 
     if (isMenuStripButton)
@@ -878,11 +940,11 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
 
     if (controlId == IdButtonPatSong)
     {
-        HBRUSH shellBrush = CreateSolidBrush(RGB(61, 69, 74));
-        HPEN shellPen = CreatePen(PS_SOLID, 1, RGB(44, 51, 55));
+        HBRUSH shellBrush = CreateSolidBrush(kFlPanelDark);
+        HPEN shellPen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
         HGDIOBJ oldBrush = SelectObject(drawItem.hDC, shellBrush);
         HGDIOBJ oldPen = SelectObject(drawItem.hDC, shellPen);
-        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 14, 14);
         SelectObject(drawItem.hDC, oldPen);
         SelectObject(drawItem.hDC, oldBrush);
         DeleteObject(shellPen);
@@ -891,14 +953,14 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         RECT patRect{rect.left + 2, rect.top + 2, rect.right - 2, rect.top + ((rect.bottom - rect.top) / 2)};
         RECT songRect{rect.left + 2, patRect.bottom, rect.right - 2, rect.bottom - 2};
         const bool patternActive = !workspace_.songMode;
-        fillRectColor(drawItem.hDC, patRect, patternActive ? RGB(240, 162, 75) : RGB(39, 48, 57));
-        fillRectColor(drawItem.hDC, songRect, workspace_.songMode ? RGB(240, 162, 75) : RGB(39, 48, 57));
-        drawHorizontalLine(drawItem.hDC, patRect.left, patRect.right, patRect.bottom, RGB(46, 53, 58));
+        fillRectColor(drawItem.hDC, patRect, patternActive ? kFlOrange : kFlPanelDarker);
+        fillRectColor(drawItem.hDC, songRect, workspace_.songMode ? kFlOrange : kFlPanelDarker);
+        drawHorizontalLine(drawItem.hDC, patRect.left, patRect.right, patRect.bottom, RGB(55, 62, 66));
 
         oldFont = SelectObject(drawItem.hDC, smallBoldFont);
-        SetTextColor(drawItem.hDC, patternActive ? RGB(59, 49, 41) : RGB(138, 150, 156));
+        SetTextColor(drawItem.hDC, patternActive ? RGB(65, 51, 37) : RGB(147, 156, 160));
         DrawTextA(drawItem.hDC, "PAT", -1, &patRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SetTextColor(drawItem.hDC, workspace_.songMode ? RGB(59, 49, 41) : RGB(138, 150, 156));
+        SetTextColor(drawItem.hDC, workspace_.songMode ? RGB(65, 51, 37) : RGB(147, 156, 160));
         DrawTextA(drawItem.hDC, "SONG", -1, &songRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(drawItem.hDC, oldFont);
         return true;
@@ -906,12 +968,12 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
 
     if (isTransportButton)
     {
-        COLORREF buttonFill = pressed ? RGB(48, 56, 61) : RGB(58, 66, 72);
+        COLORREF buttonFill = pressed ? kFlPanelDarker : kFlPanelDark;
         HBRUSH brush = CreateSolidBrush(buttonFill);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(42, 49, 54));
+        HPEN pen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
         HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
         HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
-        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 14, 14);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 16, 16);
         SelectObject(drawItem.hDC, oldPen);
         SelectObject(drawItem.hDC, oldBrush);
         DeleteObject(pen);
@@ -922,23 +984,118 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
             rect.top + ((rect.bottom - rect.top - kToolbarGlyphSize) / 2),
             rect.left + ((rect.right - rect.left - kToolbarGlyphSize) / 2) + kToolbarGlyphSize,
             rect.top + ((rect.bottom - rect.top - kToolbarGlyphSize) / 2) + kToolbarGlyphSize};
-        drawToolbarGlyph(drawItem.hDC, controlId, iconRect, RGB(216, 224, 227), active);
+        drawToolbarGlyph(drawItem.hDC, controlId, iconRect, RGB(226, 232, 235), active);
         return true;
     }
 
     if (controlId == IdButtonRecord)
     {
-        fillRectColor(drawItem.hDC, rect, RGB(93, 111, 113));
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         RECT outerRect{rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1};
-        drawFilledCircle(drawItem.hDC, outerRect, RGB(74, 83, 88), RGB(60, 68, 73));
+        drawFilledCircle(drawItem.hDC, outerRect, RGB(74, 82, 86), kFlPanelDarker);
         RECT innerRect{rect.left + 7, rect.top + 7, rect.right - 7, rect.bottom - 7};
-        drawFilledCircle(drawItem.hDC, innerRect, RGB(225, 92, 77), RGB(197, 123, 104));
+        drawFilledCircle(drawItem.hDC, innerRect, active ? RGB(234, 96, 78) : RGB(183, 88, 77), RGB(214, 130, 114));
+        return true;
+    }
+
+    if (controlId == IdButtonChronometer)
+    {
+        const bool pulsing =
+            workspace_.chronometerEnabled &&
+            visibleState_.transportState == AudioEngine::TransportState::Playing;
+        const double beatPhase = std::fmod(std::max(0.0, visibleState_.timelineSeconds) * (workspace_.tempoBpm / 60.0), 1.0);
+        const int pulseStrength =
+            pulsing && beatPhase < 0.15
+                ? clampValue(static_cast<int>(((0.15 - beatPhase) / 0.15) * 10.0), 0, 10)
+                : 0;
+        const COLORREF fillColor =
+            workspace_.chronometerEnabled
+                ? blendColor(kFlOrangeDeep, RGB(255, 204, 137), pulseStrength, 10)
+                : kFlClockPassive;
+
+        HBRUSH brush = CreateSolidBrush(fillColor);
+        HPEN pen = CreatePen(
+            PS_SOLID,
+            1,
+            workspace_.chronometerEnabled ? RGB(179, 111, 51) : kFlPanelDarker);
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 8, 8);
+        SelectObject(drawItem.hDC, oldPen);
+        SelectObject(drawItem.hDC, oldBrush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+
+        RECT clockFace{rect.left + 10, rect.top + 8, rect.left + 24, rect.top + 22};
+        drawFilledCircle(drawItem.hDC, clockFace, RGB(248, 236, 219), RGB(142, 88, 39));
+        drawVerticalLine(drawItem.hDC, clockFace.left + 7, clockFace.top + 3, clockFace.top + 9, RGB(112, 73, 38));
+        drawHorizontalLine(drawItem.hDC, clockFace.left + 7, clockFace.left + 11, clockFace.top + 9, RGB(112, 73, 38));
+        oldFont = SelectObject(drawItem.hDC, chronoFont);
+        SetTextColor(drawItem.hDC, RGB(88, 57, 30));
+        RECT textRect{rect.left + 3, rect.bottom - 14, rect.right - 3, rect.bottom - 2};
+        DrawTextA(drawItem.hDC, "CLK", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(drawItem.hDC, oldFont);
+        return true;
+    }
+
+    if (controlId == IdButtonTempoDisplay)
+    {
+        HBRUSH fieldBrush = CreateSolidBrush(kFlLcdFill);
+        HPEN fieldPen = CreatePen(PS_SOLID, 1, active ? kFlOrangeDeep : kFlLcdBorder);
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, fieldBrush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, fieldPen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 8, 8);
+        SelectObject(drawItem.hDC, oldPen);
+        SelectObject(drawItem.hDC, oldBrush);
+        DeleteObject(fieldPen);
+        DeleteObject(fieldBrush);
+
+        const double roundedTempo = roundTempoBpm(workspace_.tempoBpm);
+        int baseTempo = static_cast<int>(std::floor(roundedTempo + 0.0001));
+        int fineTempo = static_cast<int>(std::round((roundedTempo - static_cast<double>(baseTempo)) * 1000.0));
+        if (fineTempo >= 1000)
+        {
+            ++baseTempo;
+            fineTempo -= 1000;
+        }
+
+        RECT baseRect{rect.left + 10, rect.top + 3, rect.right - 38, rect.bottom - 3};
+        RECT fineRect{rect.right - 46, rect.top + 8, rect.right - 16, rect.bottom - 6};
+        RECT arrowRect{rect.right - 16, rect.top + 2, rect.right - 4, rect.bottom - 2};
+        drawVerticalLine(drawItem.hDC, rect.right - 18, rect.top + 5, rect.bottom - 5, RGB(190, 199, 202));
+        drawVerticalLine(drawItem.hDC, rect.right - 48, rect.top + 6, rect.bottom - 6, RGB(196, 206, 209));
+
+        HGDIOBJ oldLcdFont = SelectObject(drawItem.hDC, lcdFont);
+        SetTextColor(drawItem.hDC, kFlLcdText);
+        const std::string baseText = std::to_string(baseTempo);
+        DrawTextA(drawItem.hDC, baseText.c_str(), -1, &baseRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        SelectObject(drawItem.hDC, lcdFineFont);
+        char fineBuffer[8]{};
+        std::snprintf(fineBuffer, sizeof(fineBuffer), ".%03d", fineTempo);
+        SetTextColor(drawItem.hDC, tempoDragFineAdjust_ ? kFlOrangeDeep : RGB(90, 101, 105));
+        DrawTextA(drawItem.hDC, fineBuffer, -1, &fineRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        POINT arrow[3]{
+            POINT{arrowRect.left + 2, arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) - 2},
+            POINT{arrowRect.right - 2, arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) - 2},
+            POINT{arrowRect.left + ((arrowRect.right - arrowRect.left) / 2), arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) + 2}};
+        HBRUSH arrowBrush = CreateSolidBrush(RGB(127, 136, 140));
+        HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(127, 136, 140));
+        HGDIOBJ oldArrowBrush = SelectObject(drawItem.hDC, arrowBrush);
+        HGDIOBJ oldArrowPen = SelectObject(drawItem.hDC, arrowPen);
+        Polygon(drawItem.hDC, arrow, 3);
+        SelectObject(drawItem.hDC, oldArrowPen);
+        SelectObject(drawItem.hDC, oldArrowBrush);
+        DeleteObject(arrowPen);
+        DeleteObject(arrowBrush);
+        SelectObject(drawItem.hDC, oldLcdFont);
         return true;
     }
 
     if (controlId == IdButtonTempoDown || controlId == IdButtonTempoUp)
     {
-        fillRectColor(drawItem.hDC, rect, RGB(93, 111, 113));
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         return true;
     }
 
