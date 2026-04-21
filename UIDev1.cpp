@@ -11,6 +11,20 @@
 
 namespace
 {
+    constexpr COLORREF kUiPetrol = RGB(44, 58, 66);
+    constexpr COLORREF kUiAnthracite = RGB(48, 54, 61);
+    constexpr COLORREF kUiGraphite = RGB(59, 67, 76);
+    constexpr COLORREF kUiGraphiteSoft = RGB(53, 61, 69);
+    constexpr COLORREF kUiLine = RGB(74, 85, 96);
+    constexpr COLORREF kUiLineSoft = RGB(62, 72, 82);
+    constexpr COLORREF kUiText = RGB(199, 205, 211);
+    constexpr COLORREF kUiTextSoft = RGB(154, 163, 171);
+    constexpr COLORREF kUiTextDim = RGB(119, 128, 136);
+    constexpr COLORREF kUiLime = RGB(166, 240, 106);
+    constexpr COLORREF kUiLimeDim = RGB(119, 164, 84);
+    constexpr COLORREF kUiRedAccent = RGB(140, 88, 92);
+    constexpr COLORREF kUiShadow = RGB(25, 29, 34);
+
     constexpr int kOuterPadding = 12;
     constexpr int kGap = 8;
     constexpr int kToolbarHeight = 82;
@@ -18,8 +32,9 @@ namespace
     constexpr int kInfoStripHeight = 54;
     constexpr int kBrowserWidth = 286;
     constexpr int kBrowserTabCount = 3;
-    constexpr int kBrowserTabHeight = 28;
-    constexpr int kBrowserRowHeight = 44;
+    constexpr int kBrowserTabHeight = 22;
+    constexpr int kBrowserRowHeight = 28;
+    constexpr int kBrowserIndentWidth = 16;
     constexpr int kPluginHeight = 170;
     constexpr int kMixerHeight = 360;
     constexpr int kSectionHeaderHeight = 24;
@@ -31,10 +46,185 @@ namespace
     constexpr int kPlaylistLaneHeight = 36;
     constexpr int kPlaylistTimelineHeight = 28;
     constexpr int kPlaylistTrackHeaderWidth = 138;
+    constexpr int kToolbarGlyphSize = 13;
+
+    constexpr const char* kBrowserTabs[kBrowserTabCount] = {
+        "Project",
+        "Samples",
+        "Automation"};
 
     constexpr const char* kNoteNames[12] = {
         "C", "C#", "D", "D#", "E", "F",
         "F#", "G", "G#", "A", "A#", "B"};
+
+    void fillRectColor(HDC dc, const RECT& rect, COLORREF color)
+    {
+        HBRUSH brush = CreateSolidBrush(color);
+        FillRect(dc, &rect, brush);
+        DeleteObject(brush);
+    }
+
+    COLORREF blendColor(COLORREF from, COLORREF to, int numerator, int denominator)
+    {
+        if (denominator <= 0)
+        {
+            return to;
+        }
+
+        const int red =
+            (static_cast<int>(GetRValue(from)) * (denominator - numerator) + static_cast<int>(GetRValue(to)) * numerator) / denominator;
+        const int green =
+            (static_cast<int>(GetGValue(from)) * (denominator - numerator) + static_cast<int>(GetGValue(to)) * numerator) / denominator;
+        const int blue =
+            (static_cast<int>(GetBValue(from)) * (denominator - numerator) + static_cast<int>(GetBValue(to)) * numerator) / denominator;
+        return RGB(red, green, blue);
+    }
+
+    void drawHorizontalLine(HDC dc, int left, int right, int y, COLORREF color)
+    {
+        HPEN pen = CreatePen(PS_SOLID, 1, color);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        MoveToEx(dc, left, y, nullptr);
+        LineTo(dc, right, y);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+    }
+
+    void drawVerticalLine(HDC dc, int x, int top, int bottom, COLORREF color)
+    {
+        HPEN pen = CreatePen(PS_SOLID, 1, color);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        MoveToEx(dc, x, top, nullptr);
+        LineTo(dc, x, bottom);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+    }
+
+    void drawFilledCircle(HDC dc, const RECT& rect, COLORREF fillColor, COLORREF outlineColor)
+    {
+        HBRUSH brush = CreateSolidBrush(fillColor);
+        HPEN pen = CreatePen(PS_SOLID, 1, outlineColor);
+        HGDIOBJ oldBrush = SelectObject(dc, brush);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+    }
+
+    void drawCollapseTriangle(HDC dc, int x, int y, bool expanded, COLORREF color)
+    {
+        POINT points[3]{};
+        if (expanded)
+        {
+            points[0] = POINT{x, y};
+            points[1] = POINT{x + 8, y};
+            points[2] = POINT{x + 4, y + 6};
+        }
+        else
+        {
+            points[0] = POINT{x, y};
+            points[1] = POINT{x, y + 8};
+            points[2] = POINT{x + 6, y + 4};
+        }
+
+        HBRUSH brush = CreateSolidBrush(color);
+        HPEN pen = CreatePen(PS_SOLID, 1, color);
+        HGDIOBJ oldBrush = SelectObject(dc, brush);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        Polygon(dc, points, 3);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+    }
+
+    void drawToolbarGlyph(HDC dc, WORD controlId, const RECT& rect, COLORREF color, bool active)
+    {
+        HPEN pen = CreatePen(PS_SOLID, 2, color);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+
+        switch (controlId)
+        {
+        case 1003:
+            if (active)
+            {
+                drawVerticalLine(dc, rect.left + 3, rect.top + 2, rect.bottom - 2, color);
+                drawVerticalLine(dc, rect.left + 8, rect.top + 2, rect.bottom - 2, color);
+            }
+            else
+            {
+                POINT triangle[3]{
+                    POINT{rect.left + 2, rect.top + 1},
+                    POINT{rect.left + 2, rect.bottom - 1},
+                    POINT{rect.right - 1, rect.top + ((rect.bottom - rect.top) / 2)}};
+                HBRUSH brush = CreateSolidBrush(color);
+                HGDIOBJ oldGlyphBrush = SelectObject(dc, brush);
+                Polygon(dc, triangle, 3);
+                SelectObject(dc, oldGlyphBrush);
+                DeleteObject(brush);
+            }
+            break;
+
+        case 1004:
+            Rectangle(dc, rect.left + 2, rect.top + 2, rect.right - 1, rect.bottom - 1);
+            break;
+
+        case 1005:
+            drawFilledCircle(
+                dc,
+                RECT{rect.left + 2, rect.top + 2, rect.right - 1, rect.bottom - 1},
+                active ? color : blendColor(kUiAnthracite, color, 2, 7),
+                color);
+            break;
+
+        case 1013:
+            Rectangle(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
+            drawVerticalLine(dc, rect.left + 4, rect.top + 2, rect.bottom - 2, color);
+            break;
+
+        case 1014:
+            Rectangle(dc, rect.left + 1, rect.top + 1, rect.left + 5, rect.top + 5);
+            Rectangle(dc, rect.left + 7, rect.top + 1, rect.right - 1, rect.top + 5);
+            Rectangle(dc, rect.left + 1, rect.top + 7, rect.left + 5, rect.bottom - 1);
+            Rectangle(dc, rect.left + 7, rect.top + 7, rect.right - 1, rect.bottom - 1);
+            break;
+
+        case 1015:
+            Rectangle(dc, rect.left + 1, rect.top + 2, rect.right - 1, rect.bottom - 1);
+            drawVerticalLine(dc, rect.left + 4, rect.top + 2, rect.bottom - 1, color);
+            drawVerticalLine(dc, rect.left + 8, rect.top + 2, rect.bottom - 1, color);
+            break;
+
+        case 1016:
+            Rectangle(dc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
+            drawVerticalLine(dc, rect.left + 4, rect.top + 1, rect.bottom - 1, color);
+            drawVerticalLine(dc, rect.left + 8, rect.top + 1, rect.bottom - 1, color);
+            drawHorizontalLine(dc, rect.left + 1, rect.right - 1, rect.top + 4, color);
+            drawHorizontalLine(dc, rect.left + 1, rect.right - 1, rect.top + 8, color);
+            break;
+
+        case 1017:
+            drawVerticalLine(dc, rect.left + 3, rect.top + 1, rect.bottom - 1, color);
+            drawVerticalLine(dc, rect.left + 7, rect.top + 3, rect.bottom - 2, color);
+            drawVerticalLine(dc, rect.left + 11, rect.top + 2, rect.bottom - 3, color);
+            break;
+
+        case 1018:
+            Rectangle(dc, rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2);
+            drawHorizontalLine(dc, rect.left + 4, rect.right - 4, rect.top + ((rect.bottom - rect.top) / 2), color);
+            break;
+
+        default:
+            break;
+        }
+
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+    }
 
     std::string boolLabel(bool value, const char* onText, const char* offText)
     {
@@ -155,6 +345,28 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         {
             ui->refreshFromEngineSnapshot();
             return 0;
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (ui != nullptr && lParam != 0)
+        {
+            return ui->drawThemedButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam)) ? TRUE : FALSE;
+        }
+        break;
+
+    case WM_CTLCOLORSTATIC:
+        if (ui != nullptr)
+        {
+            return reinterpret_cast<LRESULT>(ui->resolveLabelBrush(reinterpret_cast<HWND>(lParam), reinterpret_cast<HDC>(wParam)));
+        }
+        break;
+
+    case WM_ERASEBKGND:
+        if (ui != nullptr)
+        {
+            ui->paintMainBackground(reinterpret_cast<HDC>(wParam));
+            return 1;
         }
         break;
 
@@ -361,8 +573,8 @@ LRESULT CALLBACK UI::DetachedPaneProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
 
 void UI::registerWindowClass()
 {
-    static HBRUSH darkFrameBrush = CreateSolidBrush(RGB(27, 31, 37));
-    static HBRUSH darkPanelBrush = CreateSolidBrush(RGB(24, 28, 34));
+    static HBRUSH darkFrameBrush = CreateSolidBrush(kUiAnthracite);
+    static HBRUSH darkPanelBrush = CreateSolidBrush(kUiPetrol);
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEXA);
@@ -445,78 +657,110 @@ void UI::createMainMenu()
         throw UiInitializationException("No se pudo crear el menu principal.");
     }
 
-    HMENU fileMenu = CreatePopupMenu();
-    HMENU editMenu = CreatePopupMenu();
-    HMENU addMenu = CreatePopupMenu();
-    HMENU patternsMenu = CreatePopupMenu();
-    HMENU viewMenu = CreatePopupMenu();
-    HMENU optionsMenu = CreatePopupMenu();
-    HMENU toolsMenu = CreatePopupMenu();
-    HMENU helpMenu = CreatePopupMenu();
+    fileMenu_ = CreatePopupMenu();
+    editMenu_ = CreatePopupMenu();
+    addMenu_ = CreatePopupMenu();
+    patternsMenu_ = CreatePopupMenu();
+    viewMenu_ = CreatePopupMenu();
+    optionsMenu_ = CreatePopupMenu();
+    toolsMenu_ = CreatePopupMenu();
+    helpMenu_ = CreatePopupMenu();
 
-    if (fileMenu == nullptr || editMenu == nullptr || addMenu == nullptr || patternsMenu == nullptr ||
-        viewMenu == nullptr || optionsMenu == nullptr || toolsMenu == nullptr || helpMenu == nullptr)
+    if (fileMenu_ == nullptr || editMenu_ == nullptr || addMenu_ == nullptr || patternsMenu_ == nullptr ||
+        viewMenu_ == nullptr || optionsMenu_ == nullptr || toolsMenu_ == nullptr || helpMenu_ == nullptr)
     {
         throw UiInitializationException("No se pudo crear uno de los submenus.");
     }
 
-    AppendMenuA(fileMenu, MF_STRING, IdMenuFileNew, "New Project");
-    AppendMenuA(fileMenu, MF_STRING, IdMenuFileOpen, "Open Project");
-    AppendMenuA(fileMenu, MF_STRING, IdMenuFileSave, "Save Project");
-    AppendMenuA(fileMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(fileMenu, MF_STRING, IdMenuFileExit, "Exit");
+    AppendMenuA(fileMenu_, MF_STRING, IdMenuFileNew, "New Project");
+    AppendMenuA(fileMenu_, MF_STRING, IdMenuFileOpen, "Open Project");
+    AppendMenuA(fileMenu_, MF_STRING, IdMenuFileSave, "Save Project");
+    AppendMenuA(fileMenu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(fileMenu_, MF_STRING, IdMenuFileExit, "Exit");
 
-    AppendMenuA(editMenu, MF_STRING, IdMenuEditUndo, "Undo");
-    AppendMenuA(editMenu, MF_STRING, IdMenuEditRedo, "Redo");
+    AppendMenuA(editMenu_, MF_STRING, IdMenuEditUndo, "Undo");
+    AppendMenuA(editMenu_, MF_STRING, IdMenuEditRedo, "Redo");
 
-    AppendMenuA(addMenu, MF_STRING, IdMenuAddTrack, "Add Track");
-    AppendMenuA(addMenu, MF_STRING, IdMenuAddBus, "Add Bus");
-    AppendMenuA(addMenu, MF_STRING, IdMenuAddClip, "Add Clip");
+    AppendMenuA(addMenu_, MF_STRING, IdMenuAddTrack, "Add Track");
+    AppendMenuA(addMenu_, MF_STRING, IdMenuAddBus, "Add Bus");
+    AppendMenuA(addMenu_, MF_STRING, IdMenuAddClip, "Add Clip");
 
-    AppendMenuA(patternsMenu, MF_STRING, IdMenuPatternsPrev, "Previous Pattern");
-    AppendMenuA(patternsMenu, MF_STRING, IdMenuPatternsNext, "Next Pattern");
+    AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsPrev, "Previous Pattern");
+    AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsNext, "Next Pattern");
 
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewBrowser, "Browser\tAlt+F8");
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewChannelRack, "Channel Rack\tF6");
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewPianoRoll, "Piano Roll\tF7");
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewPlaylist, "Playlist\tF5");
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewMixer, "Mixer\tF9");
-    AppendMenuA(viewMenu, MF_STRING, IdMenuViewPlugin, "Plugin Window");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewBrowser, "Browser\tAlt+F8");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewChannelRack, "Channel Rack\tF6");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewPianoRoll, "Piano Roll\tF7");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewPlaylist, "Playlist\tF5");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewMixer, "Mixer\tF9");
+    AppendMenuA(viewMenu_, MF_STRING, IdMenuViewPlugin, "Plugin Window");
 
-    AppendMenuA(optionsMenu, MF_STRING, IdMenuOptionsAutomation, "Toggle Automation");
-    AppendMenuA(optionsMenu, MF_STRING, IdMenuOptionsPdc, "Toggle PDC");
-    AppendMenuA(optionsMenu, MF_STRING, IdMenuOptionsAnticipative, "Toggle Anticipative");
-    AppendMenuA(optionsMenu, MF_STRING, IdMenuOptionsPatSong, "Toggle Pattern / Song");
-    AppendMenuA(optionsMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(optionsMenu, MF_STRING, IdMenuOptionsManagePlugins, "Manage Plugins");
+    AppendMenuA(optionsMenu_, MF_STRING, IdMenuOptionsAutomation, "Toggle Automation");
+    AppendMenuA(optionsMenu_, MF_STRING, IdMenuOptionsPdc, "Toggle PDC");
+    AppendMenuA(optionsMenu_, MF_STRING, IdMenuOptionsAnticipative, "Toggle Anticipative");
+    AppendMenuA(optionsMenu_, MF_STRING, IdMenuOptionsPatSong, "Toggle Pattern / Song");
+    AppendMenuA(optionsMenu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(optionsMenu_, MF_STRING, IdMenuOptionsManagePlugins, "Manage Plugins");
 
-    AppendMenuA(toolsMenu, MF_STRING, IdMenuToolsStartEngine, "Start Engine");
-    AppendMenuA(toolsMenu, MF_STRING, IdMenuToolsStopEngine, "Stop Engine");
-    AppendMenuA(toolsMenu, MF_STRING, IdMenuToolsRebuildGraph, "Rebuild Graph");
-    AppendMenuA(toolsMenu, MF_STRING, IdMenuToolsRenderOffline, "Offline Render");
+    AppendMenuA(toolsMenu_, MF_STRING, IdMenuToolsStartEngine, "Start Engine");
+    AppendMenuA(toolsMenu_, MF_STRING, IdMenuToolsStopEngine, "Stop Engine");
+    AppendMenuA(toolsMenu_, MF_STRING, IdMenuToolsRebuildGraph, "Rebuild Graph");
+    AppendMenuA(toolsMenu_, MF_STRING, IdMenuToolsRenderOffline, "Offline Render");
 
-    AppendMenuA(helpMenu, MF_STRING, IdMenuHelpAbout, "About");
+    AppendMenuA(helpMenu_, MF_STRING, IdMenuHelpAbout, "About");
 
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), "File");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(editMenu), "Edit");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(addMenu), "Add");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(patternsMenu), "Patterns");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), "View");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(optionsMenu), "Options");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(toolsMenu), "Tools");
-    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(helpMenu), "Help");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu_), "File");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(editMenu_), "Edit");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(addMenu_), "Add");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(patternsMenu_), "Patterns");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu_), "View");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(optionsMenu_), "Options");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(toolsMenu_), "Tools");
+    AppendMenuA(mainMenu_, MF_POPUP, reinterpret_cast<UINT_PTR>(helpMenu_), "Help");
 
-    if (!SetMenu(hwnd_, mainMenu_))
-    {
-        throw UiInitializationException("No se pudo asociar el menu a la ventana.");
-    }
+    SetMenu(hwnd_, nullptr);
 }
 
 void UI::createControls()
 {
-    const DWORD buttonStyle = WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON;
-    const DWORD checkboxStyle = WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX;
+    const DWORD buttonStyle = WS_VISIBLE | WS_CHILD | BS_OWNERDRAW;
+    const DWORD checkboxStyle = WS_VISIBLE | WS_CHILD | BS_OWNERDRAW;
     const DWORD staticStyle = WS_VISIBLE | WS_CHILD | SS_LEFT;
+    const WORD menuButtonIds[8] = {
+        IdButtonMenuFile,
+        IdButtonMenuEdit,
+        IdButtonMenuAdd,
+        IdButtonMenuPatterns,
+        IdButtonMenuView,
+        IdButtonMenuOptions,
+        IdButtonMenuTools,
+        IdButtonMenuHelp};
+    const char* menuButtonLabels[8] = {
+        "File",
+        "Edit",
+        "Add",
+        "Patterns",
+        "View",
+        "Options",
+        "Tools",
+        "Help"};
+
+    for (int index = 0; index < 8; ++index)
+    {
+        mainMenuButtons_[static_cast<std::size_t>(index)] =
+            CreateWindowA(
+                "BUTTON",
+                menuButtonLabels[index],
+                buttonStyle,
+                0,
+                0,
+                0,
+                0,
+                hwnd_,
+                reinterpret_cast<HMENU>(menuButtonIds[index]),
+                hInstance_,
+                nullptr);
+    }
 
     engineStartButton_ = CreateWindowA("BUTTON", "Engine", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonEngineStart), hInstance_, nullptr);
     engineStopButton_ = CreateWindowA("BUTTON", "Stop Eng", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonEngineStop), hInstance_, nullptr);
@@ -554,8 +798,8 @@ void UI::createControls()
     anticipativeCheckbox_ = CreateWindowA("BUTTON", "Anticipative", checkboxStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdCheckboxAnticipative), hInstance_, nullptr);
 
     statusLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelStatus), hInstance_, nullptr);
-    tempoLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelTempo), hInstance_, nullptr);
-    patternLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPattern), hInstance_, nullptr);
+    tempoLabel_ = CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD | SS_CENTER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelTempo), hInstance_, nullptr);
+    patternLabel_ = CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD | SS_CENTER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPattern), hInstance_, nullptr);
     snapLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelSnap), hInstance_, nullptr);
     systemLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelSystem), hInstance_, nullptr);
     hintsLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelHints), hInstance_, nullptr);
@@ -594,7 +838,13 @@ void UI::createControls()
     pluginPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlugin), hInstance_, this);
     contextLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelContext), hInstance_, nullptr);
 
-    if (engineStartButton_ == nullptr || engineStopButton_ == nullptr || playButton_ == nullptr ||
+    const bool missingMenuButton =
+        std::any_of(
+            mainMenuButtons_.begin(),
+            mainMenuButtons_.end(),
+            [](HWND button) { return button == nullptr; });
+
+    if (missingMenuButton || engineStartButton_ == nullptr || engineStopButton_ == nullptr || playButton_ == nullptr ||
         stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr ||
         tempoDownButton_ == nullptr || tempoUpButton_ == nullptr || patternPrevButton_ == nullptr ||
         patternNextButton_ == nullptr || snapPrevButton_ == nullptr || snapNextButton_ == nullptr ||
@@ -622,6 +872,11 @@ void UI::createControls()
         throw UiInitializationException("No se pudo crear uno o mas controles de la interfaz.");
     }
 
+    static HFONT numericFont = CreateFontA(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT patternFont = CreateFontA(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    SendMessageA(tempoLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(numericFont), TRUE);
+    SendMessageA(patternLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(patternFont), TRUE);
+
     layoutControls();
 }
 
@@ -637,77 +892,91 @@ void UI::layoutControls()
 
     const int width = clientRect.right - clientRect.left;
     const int height = clientRect.bottom - clientRect.top;
-    const int contentWidth = std::max(420, width - (kOuterPadding * 2));
+    const int menuStripHeight = 28;
+    const int topPanelHeight = 104;
+    const int topPanelY = menuStripHeight;
+    const int y = topPanelY + topPanelHeight + kGap;
 
-    int x = kOuterPadding;
-    const int row1Y = kOuterPadding;
-    const int row2Y = row1Y + 38;
+    const int menuButtonWidths[8] = {44, 46, 42, 78, 48, 64, 52, 46};
 
-    const auto placeRow1Button = [&](HWND control, int buttonWidth)
+    int menuX = 8;
+    for (int index = 0; index < 8; ++index)
     {
-        MoveWindow(control, x, row1Y, buttonWidth, kTransportHeight, TRUE);
-        x += buttonWidth + 6;
-    };
+        ShowWindow(mainMenuButtons_[static_cast<std::size_t>(index)], SW_SHOW);
+        MoveWindow(mainMenuButtons_[static_cast<std::size_t>(index)], menuX, 1, menuButtonWidths[index], menuStripHeight - 2, TRUE);
+        menuX += menuButtonWidths[index] + 2;
+    }
 
-    placeRow1Button(engineStartButton_, 74);
-    placeRow1Button(engineStopButton_, 84);
-    placeRow1Button(playButton_, 58);
-    placeRow1Button(stopTransportButton_, 58);
-    placeRow1Button(recordButton_, 52);
-    placeRow1Button(patSongButton_, 58);
-    placeRow1Button(tempoDownButton_, 24);
-    MoveWindow(tempoLabel_, x, row1Y + 6, 84, 20, TRUE);
-    x += 90;
-    placeRow1Button(tempoUpButton_, 24);
-    placeRow1Button(patternPrevButton_, 24);
-    MoveWindow(patternLabel_, x, row1Y + 6, 96, 20, TRUE);
-    x += 102;
-    placeRow1Button(patternNextButton_, 24);
-    placeRow1Button(snapPrevButton_, 24);
-    MoveWindow(snapLabel_, x, row1Y + 6, 108, 20, TRUE);
-    x += 114;
-    placeRow1Button(snapNextButton_, 24);
-    placeRow1Button(browserButton_, 72);
-    placeRow1Button(channelRackButton_, 64);
-    placeRow1Button(mixerButton_, 64);
-    placeRow1Button(pianoRollButton_, 64);
-    placeRow1Button(pluginButton_, 64);
-    placeRow1Button(playlistButton_, 70);
+    const int timePanelX = 22;
+    const int timePanelY = topPanelY + 12;
+    const int timePanelWidth = 210;
+    const int spectrumPanelX = timePanelX + timePanelWidth + 14;
+    const int spectrumPanelWidth = 140;
+    const int transportX = spectrumPanelX + spectrumPanelWidth + 28;
+    const int transportY = topPanelY + 18;
+    const int patternClusterWidth = 154;
+    const int patternClusterX =
+        std::min(
+            width - kOuterPadding - patternClusterWidth - 20,
+            std::max(transportX + 320, width - 460));
 
-    x = kOuterPadding;
-    const auto placeRow2Button = [&](HWND control, int buttonWidth)
-    {
-        MoveWindow(control, x, row2Y, buttonWidth, 28, TRUE);
-        x += buttonWidth + 6;
-    };
+    MoveWindow(patSongButton_, transportX, transportY + 2, 48, 56, TRUE);
+    MoveWindow(playButton_, transportX + 58, transportY + 6, 44, 36, TRUE);
+    MoveWindow(stopTransportButton_, transportX + 104, transportY + 6, 44, 36, TRUE);
+    MoveWindow(recordButton_, transportX + 156, transportY + 7, 32, 32, TRUE);
+    MoveWindow(tempoLabel_, transportX + 198, transportY + 4, 90, 38, TRUE);
 
-    placeRow2Button(addTrackButton_, 88);
-    placeRow2Button(addClipButton_, 72);
-    placeRow2Button(addBusButton_, 72);
-    placeRow2Button(undoButton_, 60);
-    placeRow2Button(redoButton_, 60);
-    placeRow2Button(saveProjectButton_, 60);
-    placeRow2Button(loadProjectButton_, 60);
-    placeRow2Button(prevTrackButton_, 72);
-    placeRow2Button(nextTrackButton_, 72);
-    placeRow2Button(rebuildGraphButton_, 68);
-    placeRow2Button(renderOfflineButton_, 68);
-    placeRow2Button(managePluginsButton_, 82);
+    MoveWindow(patternPrevButton_, patternClusterX, transportY + 2, 32, 40, TRUE);
+    MoveWindow(patternLabel_, patternClusterX + 34, transportY + 2, 56, 40, TRUE);
+    MoveWindow(patternNextButton_, patternClusterX + 92, transportY + 2, 32, 40, TRUE);
 
-    MoveWindow(automationCheckbox_, x, row2Y + 4, 98, 22, TRUE);
-    x += 104;
-    MoveWindow(pdcCheckbox_, x, row2Y + 4, 52, 22, TRUE);
-    x += 58;
-    MoveWindow(anticipativeCheckbox_, x, row2Y + 4, 102, 22, TRUE);
-    x += 108;
-    MoveWindow(systemLabel_, x, row2Y + 4, std::max(120, contentWidth - (x - kOuterPadding)), 22, TRUE);
+    MoveWindow(pianoRollButton_, patternClusterX, transportY + 50, 46, 42, TRUE);
+    MoveWindow(channelRackButton_, patternClusterX + 48, transportY + 50, 50, 42, TRUE);
+    MoveWindow(mixerButton_, patternClusterX + 100, transportY + 50, 44, 42, TRUE);
 
-    int y = kOuterPadding + kToolbarHeight + kGap;
-    MoveWindow(statusLabel_, kOuterPadding, y, contentWidth, 20, TRUE);
-    MoveWindow(projectSummaryLabel_, kOuterPadding, y + 20, contentWidth, 18, TRUE);
-    MoveWindow(documentLabel_, kOuterPadding, y + 38, contentWidth / 2, 16, TRUE);
-    MoveWindow(selectionLabel_, kOuterPadding + (contentWidth / 2), y + 38, contentWidth / 2, 16, TRUE);
-    y += kInfoStripHeight + kGap;
+    ShowWindow(patSongButton_, SW_SHOW);
+    ShowWindow(playButton_, SW_SHOW);
+    ShowWindow(stopTransportButton_, SW_SHOW);
+    ShowWindow(recordButton_, SW_SHOW);
+    ShowWindow(tempoLabel_, SW_SHOW);
+    ShowWindow(patternPrevButton_, SW_SHOW);
+    ShowWindow(patternLabel_, SW_SHOW);
+    ShowWindow(patternNextButton_, SW_SHOW);
+    ShowWindow(pianoRollButton_, SW_SHOW);
+    ShowWindow(channelRackButton_, SW_SHOW);
+    ShowWindow(mixerButton_, SW_SHOW);
+
+    ShowWindow(engineStartButton_, SW_HIDE);
+    ShowWindow(engineStopButton_, SW_HIDE);
+    ShowWindow(tempoDownButton_, SW_HIDE);
+    ShowWindow(tempoUpButton_, SW_HIDE);
+    ShowWindow(snapPrevButton_, SW_HIDE);
+    ShowWindow(snapNextButton_, SW_HIDE);
+    ShowWindow(browserButton_, SW_HIDE);
+    ShowWindow(playlistButton_, SW_HIDE);
+    ShowWindow(pluginButton_, SW_HIDE);
+    ShowWindow(addTrackButton_, SW_HIDE);
+    ShowWindow(addBusButton_, SW_HIDE);
+    ShowWindow(addClipButton_, SW_HIDE);
+    ShowWindow(undoButton_, SW_HIDE);
+    ShowWindow(redoButton_, SW_HIDE);
+    ShowWindow(saveProjectButton_, SW_HIDE);
+    ShowWindow(loadProjectButton_, SW_HIDE);
+    ShowWindow(prevTrackButton_, SW_HIDE);
+    ShowWindow(nextTrackButton_, SW_HIDE);
+    ShowWindow(rebuildGraphButton_, SW_HIDE);
+    ShowWindow(renderOfflineButton_, SW_HIDE);
+    ShowWindow(managePluginsButton_, SW_HIDE);
+    ShowWindow(automationCheckbox_, SW_HIDE);
+    ShowWindow(pdcCheckbox_, SW_HIDE);
+    ShowWindow(anticipativeCheckbox_, SW_HIDE);
+    ShowWindow(statusLabel_, SW_HIDE);
+    ShowWindow(snapLabel_, SW_HIDE);
+    ShowWindow(systemLabel_, SW_HIDE);
+    ShowWindow(projectSummaryLabel_, SW_HIDE);
+    ShowWindow(documentLabel_, SW_HIDE);
+    ShowWindow(selectionLabel_, SW_HIDE);
+    ShowWindow(contextLabel_, SW_HIDE);
 
     const int footerHeight = 18;
     const int browserAreaWidth = workspace_.browserVisible ? kBrowserWidth : 0;
@@ -815,9 +1084,10 @@ void UI::layoutControls()
     ShowWindow(stepSequencerPanel_, SW_HIDE);
     ShowWindow(mixerPanel_, SW_HIDE);
     ShowWindow(contextLabel_, SW_HIDE);
+    ShowWindow(hintsLabel_, SW_HIDE);
 
-    MoveWindow(hintsLabel_, workspaceX, height - kOuterPadding - footerHeight, workspaceWidth, footerHeight, TRUE);
     ensureDetachedWindows();
+    InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
 void UI::ensureDetachedWindows()
@@ -1172,6 +1442,8 @@ UI::VisibleEngineState UI::buildVisibleEngineState() const
     snapshot.transportState = engineSnapshot.transport.state;
     snapshot.sampleRate = static_cast<int>(engineSnapshot.device.sampleRate);
     snapshot.blockSize = static_cast<int>(engineSnapshot.device.blockSize);
+    snapshot.timelineSeconds = engineSnapshot.transport.timelineSeconds;
+    snapshot.transportSamplePosition = engineSnapshot.transport.samplePosition;
     snapshot.xruns = engineSnapshot.metrics.xruns;
     snapshot.deadlineMisses = engineSnapshot.metrics.deadlineMisses;
     snapshot.callbackCount = engineSnapshot.metrics.callbackCount;
@@ -1265,11 +1537,25 @@ UI::VisibleEngineState UI::buildVisibleEngineState() const
 void UI::updateTransportControls()
 {
     SetWindowTextA(playButton_, visibleState_.transportState == AudioEngine::TransportState::Playing ? "Pause" : "Play");
-    SetWindowTextA(recordButton_, workspace_.recordArmed ? "Rec*" : "Rec");
-    SetWindowTextA(patSongButton_, workspace_.songMode ? "Song" : "Pat");
-    setStaticText(tempoLabel_, "BPM " + std::to_string(static_cast<int>(workspace_.tempoBpm + 0.5)));
-    setStaticText(patternLabel_, "Pattern " + std::to_string(workspace_.activePattern));
+    SetWindowTextA(recordButton_, "Rec");
+    SetWindowTextA(patSongButton_, workspace_.songMode ? "SONG" : "PAT");
+
+    char tempoBuffer[32]{};
+    std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
+    setStaticText(tempoLabel_, tempoBuffer);
+    setStaticText(patternLabel_, std::to_string(workspace_.activePattern));
     setStaticText(snapLabel_, "Snap " + currentSnapLabel());
+
+    InvalidateRect(engineStartButton_, nullptr, TRUE);
+    InvalidateRect(playButton_, nullptr, TRUE);
+    InvalidateRect(recordButton_, nullptr, TRUE);
+    InvalidateRect(patSongButton_, nullptr, TRUE);
+    InvalidateRect(patternPrevButton_, nullptr, TRUE);
+    InvalidateRect(patternNextButton_, nullptr, TRUE);
+    InvalidateRect(channelRackButton_, nullptr, TRUE);
+    InvalidateRect(pianoRollButton_, nullptr, TRUE);
+    InvalidateRect(mixerButton_, nullptr, TRUE);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void UI::updateStatusLabel()
@@ -1334,6 +1620,10 @@ void UI::updateToggleStates()
     SendMessageA(automationCheckbox_, BM_SETCHECK, visibleState_.automationEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(pdcCheckbox_, BM_SETCHECK, visibleState_.pdcEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(anticipativeCheckbox_, BM_SETCHECK, visibleState_.anticipativeProcessingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    InvalidateRect(automationCheckbox_, nullptr, TRUE);
+    InvalidateRect(pdcCheckbox_, nullptr, TRUE);
+    InvalidateRect(anticipativeCheckbox_, nullptr, TRUE);
 }
 
 void UI::updateWindowTitle()
@@ -1373,12 +1663,19 @@ void UI::updateWorkspacePanels()
 
 void UI::updateViewButtons()
 {
-    SetWindowTextA(browserButton_, workspace_.browserVisible ? "Browser*" : "Browser");
-    SetWindowTextA(channelRackButton_, workspace_.channelRackVisible ? "Rack*" : "Rack");
-    SetWindowTextA(pianoRollButton_, workspace_.pianoRollVisible ? "Piano*" : "Piano");
-    SetWindowTextA(playlistButton_, "Arrange");
-    SetWindowTextA(mixerButton_, workspace_.mixerVisible ? "Mixer*" : "Mixer");
-    SetWindowTextA(pluginButton_, workspace_.pluginVisible ? "Plugin*" : "Plugin");
+    SetWindowTextA(browserButton_, "Browser");
+    SetWindowTextA(channelRackButton_, "chan.\nrack");
+    SetWindowTextA(pianoRollButton_, "piano\nroll");
+    SetWindowTextA(playlistButton_, "Playlist");
+    SetWindowTextA(mixerButton_, "mixer");
+    SetWindowTextA(pluginButton_, "Plugin");
+
+    InvalidateRect(browserButton_, nullptr, TRUE);
+    InvalidateRect(channelRackButton_, nullptr, TRUE);
+    InvalidateRect(pianoRollButton_, nullptr, TRUE);
+    InvalidateRect(playlistButton_, nullptr, TRUE);
+    InvalidateRect(mixerButton_, nullptr, TRUE);
+    InvalidateRect(pluginButton_, nullptr, TRUE);
 }
 
 void UI::requestEngineStart()
@@ -1536,10 +1833,90 @@ void UI::requestTogglePluginSandboxMode()
         (visibleState_.pluginSandboxEnabled ? "enabled." : "disabled.");
 }
 
+void UI::showMainMenuPopup(WORD commandId)
+{
+    HMENU popupMenu = nullptr;
+    HWND anchor = nullptr;
+
+    switch (commandId)
+    {
+    case IdButtonMenuFile:
+        popupMenu = fileMenu_;
+        anchor = mainMenuButtons_[0];
+        break;
+
+    case IdButtonMenuEdit:
+        popupMenu = editMenu_;
+        anchor = mainMenuButtons_[1];
+        break;
+
+    case IdButtonMenuAdd:
+        popupMenu = addMenu_;
+        anchor = mainMenuButtons_[2];
+        break;
+
+    case IdButtonMenuPatterns:
+        popupMenu = patternsMenu_;
+        anchor = mainMenuButtons_[3];
+        break;
+
+    case IdButtonMenuView:
+        popupMenu = viewMenu_;
+        anchor = mainMenuButtons_[4];
+        break;
+
+    case IdButtonMenuOptions:
+        popupMenu = optionsMenu_;
+        anchor = mainMenuButtons_[5];
+        break;
+
+    case IdButtonMenuTools:
+        popupMenu = toolsMenu_;
+        anchor = mainMenuButtons_[6];
+        break;
+
+    case IdButtonMenuHelp:
+        popupMenu = helpMenu_;
+        anchor = mainMenuButtons_[7];
+        break;
+
+    default:
+        break;
+    }
+
+    if (popupMenu == nullptr || anchor == nullptr)
+    {
+        return;
+    }
+
+    RECT anchorRect{};
+    GetWindowRect(anchor, &anchorRect);
+    SetForegroundWindow(hwnd_);
+    TrackPopupMenu(
+        popupMenu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON,
+        anchorRect.left,
+        anchorRect.bottom,
+        0,
+        hwnd_,
+        nullptr);
+}
+
 void UI::handleCommand(WORD commandId)
 {
     switch (commandId)
     {
+    case IdButtonMenuFile:
+    case IdButtonMenuEdit:
+    case IdButtonMenuAdd:
+    case IdButtonMenuPatterns:
+    case IdButtonMenuView:
+    case IdButtonMenuOptions:
+    case IdButtonMenuTools:
+    case IdButtonMenuHelp:
+        showMainMenuPopup(commandId);
+        break;
+
     case IdButtonEngineStart:
     case IdMenuToolsStartEngine:
         requestEngineStart();
@@ -2032,7 +2409,6 @@ std::string UI::currentSnapLabel() const
 
 std::string UI::currentBrowserTabLabel() const
 {
-    static constexpr const char* kBrowserTabs[] = {"Patterns", "Audio Clips", "Automation Clips"};
     return kBrowserTabs[std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1)];
 }
 
@@ -2065,14 +2441,17 @@ std::string UI::buildBrowserPanelText() const
     for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
     {
         const BrowserEntry& entry = workspaceModel_.browserEntries[index];
+        browser << std::string(static_cast<std::size_t>(std::max(0, entry.indentLevel) * 2), ' ');
         browser
-            << (static_cast<int>(index) == workspaceModel_.selectedBrowserIndex ? "> " : "  ")
-            << entry.category << " | " << entry.label;
+            << (entry.group ? (entry.expanded ? "v " : "> ") : (static_cast<int>(index) == workspaceModel_.selectedBrowserIndex ? "> " : "- "))
+            << entry.label;
         if (entry.favorite)
         {
-            browser << " | Fav";
+            browser << " | Active";
         }
-        browser << "\n    " << entry.subtitle << "\n";
+        browser << "\n"
+                << std::string(static_cast<std::size_t>(std::max(0, entry.indentLevel) * 2 + 4), ' ')
+                << entry.category << " | " << entry.subtitle << "\n";
     }
 
     browser
@@ -2583,9 +2962,11 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
     RECT rect{};
     GetClientRect(hwnd, &rect);
 
-    HBRUSH background = CreateSolidBrush(RGB(30, 33, 39));
-    FillRect(dc, &rect, background);
-    DeleteObject(background);
+    const COLORREF backgroundColor =
+        kind == SurfaceKind::Browser ? blendColor(kUiGraphite, kUiShadow, 1, 5) :
+        kind == SurfaceKind::Playlist ? blendColor(kUiPetrol, kUiShadow, 1, 5) :
+        blendColor(kUiPetrol, kUiShadow, 1, 4);
+    fillRectColor(dc, rect, backgroundColor);
 
     SetBkMode(dc, TRANSPARENT);
 
@@ -2608,73 +2989,95 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
 
 void UI::paintBrowserSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Browser", "Docked browser");
+    drawSurfaceHeader(dc, rect, "Browser", "Compact navigator");
 
     const int tabLeft = rect.left + 8;
-    const int tabTop = rect.top + kSurfaceHeaderHeight + 6;
+    const int tabTop = rect.top + kSurfaceHeaderHeight + 4;
     const int clientWidth = static_cast<int>(rect.right - rect.left);
-    const int tabWidth = std::max(60, (clientWidth - 16 - ((kBrowserTabCount - 1) * 6)) / kBrowserTabCount);
-    const int contentTop = tabTop + kBrowserTabHeight + 10;
+    const int tabWidth = std::max(56, (clientWidth - 16 - ((kBrowserTabCount - 1) * 4)) / kBrowserTabCount);
+    const int contentTop = tabTop + kBrowserTabHeight + 8;
     const int footerHeight = 28;
 
-    static constexpr const char* kBrowserTabs[] = {"Patterns", "Audio Clips", "Automation Clips"};
+    RECT contentRect{rect.left + 1, contentTop, rect.right - 1, rect.bottom - footerHeight - 2};
+    fillRectColor(dc, contentRect, blendColor(kUiGraphite, kUiShadow, 1, 5));
+
     for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
     {
         RECT tabRect{
-            tabLeft + tabIndex * (tabWidth + 6),
+            tabLeft + tabIndex * (tabWidth + 4),
             tabTop,
-            tabLeft + tabIndex * (tabWidth + 6) + tabWidth,
+            tabLeft + tabIndex * (tabWidth + 4) + tabWidth,
             tabTop + kBrowserTabHeight};
         const bool selected = static_cast<std::size_t>(tabIndex) == workspace_.browserTabIndex;
-        HBRUSH tabBrush = CreateSolidBrush(selected ? RGB(88, 104, 124) : RGB(42, 48, 58));
-        FillRect(dc, &tabRect, tabBrush);
-        DeleteObject(tabBrush);
-        SetTextColor(dc, selected ? RGB(250, 250, 250) : RGB(178, 188, 202));
-        DrawTextA(dc, kBrowserTabs[tabIndex], -1, &tabRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        fillRectColor(
+            dc,
+            tabRect,
+            selected ? blendColor(kUiPetrol, kUiAnthracite, 1, 2) : blendColor(kUiAnthracite, kUiShadow, 1, 4));
+        drawSurfaceFrame(dc, tabRect, selected ? blendColor(kUiLime, kUiLine, 1, 4) : kUiLineSoft);
+        SetTextColor(dc, selected ? kUiLime : kUiTextSoft);
+        DrawTextA(dc, kBrowserTabs[tabIndex], -1, &tabRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     int y = contentTop;
     for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
     {
-        if (y + kBrowserRowHeight > rect.bottom - footerHeight - 8)
+        if (y + kBrowserRowHeight > rect.bottom - footerHeight - 6)
         {
             break;
         }
 
         const BrowserEntry& entry = workspaceModel_.browserEntries[index];
-        RECT itemRect{rect.left + 8, y, rect.right - 8, y + kBrowserRowHeight};
+        RECT itemRect{rect.left + 6, y, rect.right - 6, y + kBrowserRowHeight};
         const bool selected = static_cast<int>(index) == workspaceModel_.selectedBrowserIndex;
-        HBRUSH rowBrush = CreateSolidBrush(selected ? RGB(55, 67, 82) : RGB(34, 39, 46));
-        FillRect(dc, &itemRect, rowBrush);
-        DeleteObject(rowBrush);
+        fillRectColor(
+            dc,
+            itemRect,
+            selected
+                ? blendColor(kUiPetrol, kUiAnthracite, 1, 2)
+                : (entry.group ? blendColor(kUiAnthracite, kUiShadow, 1, 5) : blendColor(kUiGraphite, kUiShadow, 1, 7)));
 
-        RECT accentRect{itemRect.left, itemRect.top, itemRect.left + 4, itemRect.bottom};
-        HBRUSH accentBrush = CreateSolidBrush(entry.favorite ? RGB(235, 167, 72) : RGB(74, 84, 98));
-        FillRect(dc, &accentRect, accentBrush);
-        DeleteObject(accentBrush);
+        if (selected)
+        {
+            RECT accentRect{itemRect.left, itemRect.top + 2, itemRect.left + 3, itemRect.bottom - 2};
+            fillRectColor(dc, accentRect, kUiRedAccent);
+        }
 
-        RECT categoryRect{itemRect.left + 12, itemRect.top + 4, itemRect.right - 12, itemRect.top + 17};
-        SetTextColor(dc, RGB(150, 166, 184));
-        DrawTextA(dc, entry.category.c_str(), -1, &categoryRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        drawHorizontalLine(dc, itemRect.left, itemRect.right, itemRect.bottom - 1, kUiLineSoft);
 
-        RECT labelRect{itemRect.left + 12, itemRect.top + 15, itemRect.right - 12, itemRect.top + 31};
-        SetTextColor(dc, RGB(236, 239, 244));
-        DrawTextA(dc, entry.label.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const int treeX = itemRect.left + 8 + (entry.indentLevel * kBrowserIndentWidth);
+        const int centerY = itemRect.top + (kBrowserRowHeight / 2);
+        if (entry.group)
+        {
+            drawCollapseTriangle(dc, treeX, centerY - 4, entry.expanded, selected ? kUiText : kUiTextSoft);
+        }
+        else
+        {
+            RECT iconRect{treeX, centerY - 3, treeX + 6, centerY + 3};
+            fillRectColor(dc, iconRect, entry.favorite ? kUiLime : blendColor(kUiLine, kUiTextDim, 1, 2));
+        }
 
-        RECT subtitleRect{itemRect.left + 12, itemRect.top + 28, itemRect.right - 12, itemRect.bottom - 5};
-        SetTextColor(dc, RGB(169, 178, 192));
+        RECT labelRect{treeX + 14, itemRect.top + 3, itemRect.right - 68, itemRect.top + 15};
+        RECT subtitleRect{treeX + 14, itemRect.top + 14, itemRect.right - 68, itemRect.bottom - 3};
+        RECT categoryRect{itemRect.right - 64, itemRect.top + 3, itemRect.right - 10, itemRect.top + 15};
+
+        SetTextColor(dc, selected ? kUiText : (entry.group ? kUiTextSoft : kUiText));
+        DrawTextA(dc, entry.label.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SetTextColor(dc, kUiTextDim);
         DrawTextA(dc, entry.subtitle.c_str(), -1, &subtitleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        y += kBrowserRowHeight + 6;
+        SetTextColor(dc, entry.favorite ? kUiLimeDim : kUiTextDim);
+        DrawTextA(dc, entry.category.c_str(), -1, &categoryRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        y += kBrowserRowHeight;
     }
 
     RECT footerRect{rect.left + 8, rect.bottom - footerHeight, rect.right - 8, rect.bottom - 8};
-    HBRUSH footerBrush = CreateSolidBrush(RGB(39, 45, 53));
-    FillRect(dc, &footerRect, footerBrush);
-    DeleteObject(footerBrush);
-    SetTextColor(dc, RGB(174, 186, 200));
+    fillRectColor(dc, footerRect, blendColor(kUiAnthracite, kUiShadow, 1, 4));
+    drawHorizontalLine(dc, footerRect.left, footerRect.right, footerRect.top, kUiLineSoft);
+    SetTextColor(dc, kUiTextSoft);
     DrawTextA(dc, browserDropTargetLabel().c_str(), -1, &footerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    drawSurfaceFrame(dc, rect, RGB(74, 90, 112));
+    drawSurfaceFrame(dc, rect, kUiLine);
 }
 
 void UI::paintChannelRackSurface(HDC dc, const RECT& rect)
@@ -2849,85 +3252,108 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     const int leftInset = kPlaylistTrackHeaderWidth;
     const int columns = kPlaylistCellCount;
     const int laneCount = std::max<int>(10, static_cast<int>(workspaceModel_.patternLanes.size() + workspaceModel_.automationLanes.size()));
-    const int playlistWidth = std::max<int>(120, static_cast<int>(rect.right) - leftInset);
+    const int playlistWidth = std::max<int>(120, static_cast<int>(rect.right - rect.left) - leftInset);
     const int columnWidth = std::max<int>(24, playlistWidth / columns);
 
     RECT trackHeaderRect{rect.left, gridTop, rect.left + leftInset, rect.bottom};
-    HBRUSH headerBrush = CreateSolidBrush(RGB(56, 63, 72));
-    FillRect(dc, &trackHeaderRect, headerBrush);
-    DeleteObject(headerBrush);
+    fillRectColor(dc, trackHeaderRect, blendColor(kUiAnthracite, kUiShadow, 1, 5));
 
     RECT timelineRect{rect.left + leftInset, timelineTop, rect.right, gridTop};
-    HBRUSH timelineBrush = CreateSolidBrush(RGB(53, 60, 69));
-    FillRect(dc, &timelineRect, timelineBrush);
-    DeleteObject(timelineBrush);
+    fillRectColor(dc, timelineRect, blendColor(kUiPetrol, kUiAnthracite, 1, 3));
 
     RECT gutterRect{rect.left, timelineTop, rect.left + leftInset, gridTop};
-    HBRUSH gutterBrush = CreateSolidBrush(RGB(49, 56, 66));
-    FillRect(dc, &gutterRect, gutterBrush);
-    DeleteObject(gutterBrush);
+    fillRectColor(dc, gutterRect, kUiAnthracite);
 
-    HPEN majorPen = CreatePen(PS_SOLID, 1, RGB(74, 84, 98));
-    HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(48, 54, 64));
+    RECT gridRect{rect.left + leftInset, gridTop, rect.right, rect.bottom};
+    fillRectColor(dc, gridRect, blendColor(kUiPetrol, kUiShadow, 1, 5));
 
     for (int lane = 0; lane < laneCount; ++lane)
     {
         const int y = gridTop + (lane * laneHeight);
-        RECT laneRect{rect.left + leftInset, y, rect.right, y + laneHeight};
-        HBRUSH laneBrush = CreateSolidBrush((lane % 2) == 0 ? RGB(37, 42, 50) : RGB(33, 38, 46));
-        FillRect(dc, &laneRect, laneBrush);
-        DeleteObject(laneBrush);
-
-        RECT labelRect{rect.left + 12, y + 3, rect.left + leftInset - 12, y + laneHeight - 3};
         const bool isTrackLane = lane < static_cast<int>(workspaceModel_.patternLanes.size());
         const int automationIndex = lane - static_cast<int>(workspaceModel_.patternLanes.size());
         const bool isAutomationLane =
             !isTrackLane && automationIndex >= 0 && automationIndex < static_cast<int>(workspaceModel_.automationLanes.size());
+        const bool laneSelected =
+            isTrackLane &&
+            (static_cast<std::size_t>(lane) == selectedTrackIndex_ ||
+             static_cast<int>(workspaceModel_.activeChannelIndex) == lane);
         const std::string laneName =
             isTrackLane
                 ? workspaceModel_.patternLanes[static_cast<std::size_t>(lane)].name
                 : (isAutomationLane
                        ? ("Automation " + workspaceModel_.automationLanes[static_cast<std::size_t>(automationIndex)].target)
                        : ("Track " + std::to_string(lane + 1)));
-        SetTextColor(dc, isAutomationLane ? RGB(226, 165, 194) : RGB(215, 221, 228));
+        const std::string laneMeta =
+            isTrackLane
+                ? ("Track " + std::to_string(lane + 1))
+                : (isAutomationLane ? "Automation lane" : "Lane");
+
+        RECT laneRect{rect.left + leftInset, y, rect.right, y + laneHeight};
+        RECT headerLaneRect{rect.left, y, rect.left + leftInset, y + laneHeight};
+        fillRectColor(
+            dc,
+            laneRect,
+            laneSelected
+                ? blendColor(kUiPetrol, kUiAnthracite, 1, 3)
+                : ((lane % 2) == 0 ? blendColor(kUiPetrol, kUiShadow, 1, 6) : blendColor(kUiPetrol, kUiAnthracite, 1, 8)));
+        fillRectColor(
+            dc,
+            headerLaneRect,
+            laneSelected
+                ? blendColor(kUiGraphite, kUiAnthracite, 1, 2)
+                : ((lane % 2) == 0 ? blendColor(kUiAnthracite, kUiShadow, 1, 5) : blendColor(kUiGraphite, kUiShadow, 1, 6)));
+
+        RECT metaRect{rect.left + 12, y + 4, rect.left + leftInset - 30, y + 15};
+        RECT labelRect{rect.left + 12, y + 15, rect.left + leftInset - 30, y + laneHeight - 4};
+        SetTextColor(dc, kUiTextDim);
+        DrawTextA(dc, laneMeta.c_str(), -1, &metaRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SetTextColor(dc, isAutomationLane ? blendColor(kUiText, RGB(216, 180, 196), 1, 4) : kUiText);
         DrawTextA(dc, laneName.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        SelectObject(dc, minorPen);
-        MoveToEx(dc, rect.left, y, nullptr);
-        LineTo(dc, rect.right, y);
+        if (isTrackLane)
+        {
+            RECT indicatorRect{rect.left + leftInset - 18, y + (laneHeight / 2) - 4, rect.left + leftInset - 10, y + (laneHeight / 2) + 4};
+            drawFilledCircle(dc, indicatorRect, laneSelected ? kUiLime : kUiLimeDim, blendColor(kUiLime, kUiShadow, 1, 3));
+        }
+        else if (isAutomationLane)
+        {
+            RECT indicatorRect{rect.left + leftInset - 18, y + (laneHeight / 2) - 3, rect.left + leftInset - 10, y + (laneHeight / 2) + 3};
+            fillRectColor(dc, indicatorRect, blendColor(kUiTextSoft, kUiAnthracite, 1, 2));
+        }
+
+        drawHorizontalLine(dc, rect.left, rect.right, y, kUiLineSoft);
     }
 
     for (int col = 0; col <= columns; ++col)
     {
         const int x = rect.left + leftInset + (col * columnWidth);
-        SelectObject(dc, (col % 4 == 0) ? majorPen : minorPen);
-        MoveToEx(dc, x, timelineTop, nullptr);
-        LineTo(dc, x, rect.bottom);
+        const bool majorDivision = (col % 4) == 0;
+        drawVerticalLine(
+            dc,
+            x,
+            timelineTop,
+            rect.bottom,
+            majorDivision ? kUiLine : blendColor(kUiPetrol, kUiLineSoft, 1, 6));
 
         if (col < columns)
         {
             RECT beatRect{x + 4, timelineTop + 5, x + 32, gridTop - 4};
-            SetTextColor(dc, (col % 4 == 0) ? RGB(222, 228, 236) : RGB(137, 148, 162));
+            SetTextColor(dc, majorDivision ? kUiText : kUiTextSoft);
             const std::string beatLabel = std::to_string(col + 1);
             DrawTextA(dc, beatLabel.c_str(), -1, &beatRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
     }
 
-    DeleteObject(majorPen);
-    DeleteObject(minorPen);
+    drawVerticalLine(dc, rect.left + leftInset, timelineTop, rect.bottom, kUiLine);
 
     for (const auto& marker : workspaceModel_.markers)
     {
         const int x = rect.left + leftInset + (marker.timelineCell * columnWidth);
-        HPEN markerPen = CreatePen(PS_SOLID, 1, RGB(255, 207, 84));
-        HGDIOBJ oldPen = SelectObject(dc, markerPen);
-        MoveToEx(dc, x, timelineTop, nullptr);
-        LineTo(dc, x, rect.bottom);
-        SelectObject(dc, oldPen);
-        DeleteObject(markerPen);
+        drawVerticalLine(dc, x, timelineTop, rect.bottom, blendColor(kUiLime, kUiLine, 1, 3));
 
         RECT markerRect{x + 4, timelineTop + 2, x + 72, timelineTop + 18};
-        SetTextColor(dc, RGB(255, 222, 128));
+        SetTextColor(dc, kUiTextSoft);
         DrawTextA(dc, marker.name.c_str(), -1, &markerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
@@ -2942,25 +3368,24 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 
         RECT clipRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
         const bool isAudioClip = clip.clipType == "Audio";
-        HBRUSH clipBrush = CreateSolidBrush(
+        fillRectColor(
+            dc,
+            clipRect,
             clip.selected
-                ? (isAudioClip ? RGB(150, 192, 128) : RGB(139, 205, 244))
-                : (isAudioClip ? RGB(98, 138, 81) : RGB(79, 156, 210)));
-        FillRect(dc, &clipRect, clipBrush);
-        DeleteObject(clipBrush);
+                ? (isAudioClip ? RGB(100, 122, 103) : RGB(89, 112, 126))
+                : (isAudioClip ? RGB(73, 93, 77) : RGB(66, 86, 100)));
+        drawSurfaceFrame(dc, clipRect, clip.selected ? blendColor(kUiLime, kUiLine, 1, 3) : kUiLineSoft);
         RECT leftHandle{clipRect.left, clipRect.top, clipRect.left + 6, clipRect.bottom};
         RECT rightHandle{clipRect.right - 6, clipRect.top, clipRect.right, clipRect.bottom};
-        HBRUSH handleBrush = CreateSolidBrush(isAudioClip ? RGB(220, 235, 207) : RGB(220, 240, 255));
-        FillRect(dc, &leftHandle, handleBrush);
-        FillRect(dc, &rightHandle, handleBrush);
-        DeleteObject(handleBrush);
+        fillRectColor(dc, leftHandle, blendColor(kUiTextSoft, isAudioClip ? RGB(112, 140, 118) : RGB(100, 130, 145), 1, 2));
+        fillRectColor(dc, rightHandle, blendColor(kUiTextSoft, isAudioClip ? RGB(112, 140, 118) : RGB(100, 130, 145), 1, 2));
 
         RECT clipLabelRect{clipRect.left + 10, clipRect.top + 2, clipRect.right - 8, clipRect.bottom - 2};
-        SetTextColor(dc, RGB(18, 21, 28));
-        DrawTextA( dc, clip.label.c_str(), -1, &clipLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SetTextColor(dc, kUiText);
+        DrawTextA(dc, clip.label.c_str(), -1, &clipLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
-    HPEN automationPen = CreatePen(PS_SOLID, 2, RGB(255, 216, 238));
+    HPEN automationPen = CreatePen(PS_SOLID, 2, RGB(214, 187, 200));
     for (const auto& clip : interactionState_.playlistClipVisuals)
     {
         if (!clip.automation)
@@ -2978,14 +3403,14 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         }
 
         RECT automationRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
-        HBRUSH automationBrush = CreateSolidBrush(automationIt->selected ? RGB(255, 160, 205) : RGB(228, 110, 168));
-        FillRect(dc, &automationRect, automationBrush);
-        DeleteObject(automationBrush);
+        fillRectColor(
+            dc,
+            automationRect,
+            automationIt->selected ? RGB(118, 92, 108) : RGB(94, 74, 86));
+        drawSurfaceFrame(dc, automationRect, automationIt->selected ? blendColor(kUiLime, kUiLine, 1, 4) : kUiLineSoft);
 
         RECT rightHandle{automationRect.right - 6, automationRect.top, automationRect.right, automationRect.bottom};
-        HBRUSH handleBrush = CreateSolidBrush(RGB(255, 232, 243));
-        FillRect(dc, &rightHandle, handleBrush);
-        DeleteObject(handleBrush);
+        fillRectColor(dc, rightHandle, RGB(166, 136, 152));
 
         HGDIOBJ oldPen = SelectObject(dc, automationPen);
         const int pointCount = static_cast<int>(automationIt->values.size());
@@ -3005,14 +3430,14 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         SelectObject(dc, oldPen);
 
         RECT labelRect{automationRect.left + 4, automationRect.top + 2, automationRect.right - 4, automationRect.top + 18};
-        SetTextColor(dc, RGB(40, 22, 34));
+        SetTextColor(dc, kUiText);
         DrawTextA(dc, automationIt->target.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     DeleteObject(automationPen);
 
     if (interactionState_.marqueeActive && interactionState_.activeSurface == SurfaceKind::Playlist)
     {
-        HPEN marqueePen = CreatePen(PS_DOT, 1, RGB(255, 255, 255));
+        HPEN marqueePen = CreatePen(PS_DOT, 1, kUiText);
         HGDIOBJ oldPen = SelectObject(dc, marqueePen);
         HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
         Rectangle(dc, interactionState_.marqueeRect.left, interactionState_.marqueeRect.top, interactionState_.marqueeRect.right, interactionState_.marqueeRect.bottom);
@@ -3021,7 +3446,7 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         DeleteObject(marqueePen);
     }
 
-    drawSurfaceFrame(dc, rect, RGB(84, 96, 116));
+    drawSurfaceFrame(dc, rect, kUiLine);
 }
 
 void UI::paintMixerSurface(HDC dc, const RECT& rect)
@@ -3197,12 +3622,12 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int tabTop = kSurfaceHeaderHeight + 6;
+        const int tabTop = kSurfaceHeaderHeight + 4;
         const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
-        const int tabWidth = std::max(60, (clientWidth - 16 - ((kBrowserTabCount - 1) * 6)) / kBrowserTabCount);
+        const int tabWidth = std::max(56, (clientWidth - 16 - ((kBrowserTabCount - 1) * 4)) / kBrowserTabCount);
         for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
         {
-            const int tabLeft = 8 + tabIndex * (tabWidth + 6);
+            const int tabLeft = 8 + tabIndex * (tabWidth + 4);
             if (x >= tabLeft && x <= (tabLeft + tabWidth) && y >= tabTop && y <= (tabTop + kBrowserTabHeight))
             {
                 workspace_.browserTabIndex = static_cast<std::size_t>(tabIndex);
@@ -3217,13 +3642,15 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
         }
 
         interactionState_.browserDragActive = false;
-        const int browserIndex = std::max(0, (y - (tabTop + kBrowserTabHeight + 10)) / (kBrowserRowHeight + 6));
+        const int contentTop = tabTop + kBrowserTabHeight + 8;
+        const int browserIndex = y < contentTop ? -1 : ((y - contentTop) / kBrowserRowHeight);
         if (!workspaceModel_.browserEntries.empty() &&
+            browserIndex >= 0 &&
             browserIndex < static_cast<int>(workspaceModel_.browserEntries.size()))
         {
-            interactionState_.browserDragActive = true;
             interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(browserIndex);
             workspaceModel_.selectedBrowserIndex = browserIndex;
+            interactionState_.browserDragActive = !workspaceModel_.browserEntries[static_cast<std::size_t>(browserIndex)].group;
         }
     }
     else if (kind == SurfaceKind::ChannelRack)
@@ -3700,14 +4127,38 @@ void UI::rebuildBrowserEntries()
 {
     workspaceModel_.browserEntries.clear();
 
-    auto addEntry = [&](std::string category, std::string label, std::string subtitle, bool favorite = false)
+    auto addEntry = [&](std::string category, std::string label, std::string subtitle, bool favorite = false, int indentLevel = 0, bool group = false, bool expanded = false)
     {
-        workspaceModel_.browserEntries.push_back(BrowserEntry{std::move(category), std::move(label), std::move(subtitle), favorite});
+        workspaceModel_.browserEntries.push_back(
+            BrowserEntry{
+                std::move(category),
+                std::move(label),
+                std::move(subtitle),
+                favorite,
+                indentLevel,
+                group,
+                expanded});
     };
 
     switch (std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1))
     {
     case 0:
+        addEntry(
+            "Project",
+            visibleState_.project.projectName.empty() ? "Current project" : visibleState_.project.projectName,
+            visibleState_.document.sessionPath.empty() ? "Playlist, patterns and channels" : visibleState_.document.sessionPath,
+            false,
+            0,
+            true,
+            true);
+        addEntry(
+            "Patterns",
+            "Patterns",
+            std::to_string(workspaceModel_.patterns.size()) + " pattern slots",
+            false,
+            0,
+            true,
+            true);
         for (const auto& pattern : workspaceModel_.patterns)
         {
             int laneCountWithSteps = 0;
@@ -3728,11 +4179,38 @@ void UI::rebuildBrowserEntries()
                 std::to_string(pattern.lanes.size()) + " channels | " +
                     std::to_string(laneCountWithSteps) + " active step lanes | " +
                     std::to_string(pattern.lengthInBars) + " bars",
-                pattern.patternNumber == workspace_.activePattern);
+                pattern.patternNumber == workspace_.activePattern,
+                1);
+        }
+
+        if (!visibleState_.project.tracks.empty())
+        {
+            addEntry(
+                "Channel Rack",
+                "Channels",
+                std::to_string(visibleState_.project.tracks.size()) + " playlist tracks",
+                false,
+                0,
+                true,
+                true);
+
+            const std::size_t visibleTrackCount = std::min<std::size_t>(visibleState_.project.tracks.size(), 6);
+            for (std::size_t index = 0; index < visibleTrackCount; ++index)
+            {
+                const auto& track = visibleState_.project.tracks[index];
+                addEntry(
+                    "Track",
+                    track.name,
+                    std::to_string(track.clips.size()) + " clips | Bus " + std::to_string(track.busId),
+                    track.trackId == visibleState_.selection.selectedTrackId,
+                    1);
+            }
         }
         break;
+
     case 1:
     {
+        addEntry("Packs", "Packs", "Samples, one-shots and rendered audio", false, 0, true, true);
         bool addedAudio = false;
         for (const auto& block : workspaceModel_.playlistBlocks)
         {
@@ -3747,18 +4225,24 @@ void UI::rebuildBrowserEntries()
                 block.label,
                 "Playlist lane " + std::to_string(block.lane + 1) + " | Start " +
                     std::to_string(block.startCell + 1) + " | Length " + std::to_string(block.lengthCells) + " cells",
-                block.selected);
+                block.selected,
+                1);
         }
 
         if (!addedAudio)
         {
-            addEntry("Audio", "Lead Vox Chop", "Preview sample ready for playlist", true);
-            addEntry("Audio", "Impact Downlifter", "Transition FX clip");
-            addEntry("Audio", "Analog Bass One-Shot", "Sampler-ready source clip");
+            addEntry("Sample", "Lead Vox Chop", "Preview sample ready for playlist", true, 1);
+            addEntry("Sample", "Impact Downlifter", "Transition FX clip", false, 1);
+            addEntry("Sample", "Analog Bass One-Shot", "Sampler-ready source clip", false, 1);
         }
+
+        addEntry("Presets", "Plugin database", "Presets, wrappers and channel states", false, 0, true, true);
+        addEntry("Preset", "Sampler defaults", "Compact rack preset ready for drag-drop", false, 1);
         break;
     }
+
     default:
+        addEntry("Current project", "Automation clips", "Playlist envelopes and linked controls", false, 0, true, true);
         for (const auto& automation : workspaceModel_.automationLanes)
         {
             addEntry(
@@ -3767,15 +4251,48 @@ void UI::rebuildBrowserEntries()
                 "Lane " + std::to_string(automation.lane + 1) + " | Start " +
                     std::to_string(automation.startCell + 1) + " | " +
                     std::to_string(automation.values.size()) + " points",
-                automation.selected);
+                automation.selected,
+                1);
         }
 
         if (workspaceModel_.automationLanes.empty())
         {
-            addEntry("Automation", "Master Volume", "Fallback envelope lane", true);
-            addEntry("Automation", "Filter Cutoff", "Sweep automation clip");
+            addEntry("Automation", "Master Volume", "Fallback envelope lane", true, 1);
+            addEntry("Automation", "Filter Cutoff", "Sweep automation clip", false, 1);
         }
         break;
+    }
+
+    if (workspaceModel_.browserEntries.empty())
+    {
+        workspaceModel_.selectedBrowserIndex = 0;
+        return;
+    }
+
+    const int maxIndex = static_cast<int>(workspaceModel_.browserEntries.size() - 1);
+    int preferredIndex = -1;
+    int firstLeafIndex = -1;
+    for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
+    {
+        const BrowserEntry& entry = workspaceModel_.browserEntries[index];
+        if (!entry.group && firstLeafIndex < 0)
+        {
+            firstLeafIndex = static_cast<int>(index);
+        }
+        if (!entry.group && entry.favorite)
+        {
+            preferredIndex = static_cast<int>(index);
+            break;
+        }
+    }
+
+    workspaceModel_.selectedBrowserIndex = clampValue(workspaceModel_.selectedBrowserIndex, 0, maxIndex);
+    if (workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)].group)
+    {
+        workspaceModel_.selectedBrowserIndex =
+            preferredIndex >= 0 ? preferredIndex :
+            firstLeafIndex >= 0 ? firstLeafIndex :
+            workspaceModel_.selectedBrowserIndex;
     }
 }
 
@@ -4004,21 +4521,507 @@ void UI::ensurePatternLaneNoteContent(PatternLaneState& lane, std::size_t laneIn
     lane.notes.push_back(PianoNoteState{rootLane + 12, 14, 2, 92, false, (laneIndex % 2) == 0, false});
 }
 
+void UI::paintMainBackground(HDC dc) const
+{
+    if (hwnd_ == nullptr)
+    {
+        return;
+    }
+
+    RECT clientRect{};
+    GetClientRect(hwnd_, &clientRect);
+
+    fillRectColor(dc, clientRect, kUiShadow);
+
+    const int menuStripHeight = 28;
+    const int topPanelHeight = 104;
+    const int topPanelY = menuStripHeight;
+    const int workspaceTop = topPanelY + topPanelHeight + kGap;
+
+    RECT menuRect{clientRect.left, clientRect.top, clientRect.right, menuStripHeight};
+    RECT toolbarRect{clientRect.left, menuStripHeight, clientRect.right, topPanelY + topPanelHeight};
+    RECT workspaceRect{clientRect.left, workspaceTop, clientRect.right, clientRect.bottom};
+
+    fillRectColor(dc, menuRect, RGB(56, 64, 67));
+    fillRectColor(dc, toolbarRect, RGB(93, 111, 113));
+    fillRectColor(dc, workspaceRect, blendColor(kUiPetrol, kUiShadow, 1, 4));
+    drawHorizontalLine(dc, clientRect.left, clientRect.right, menuStripHeight - 1, RGB(73, 82, 86));
+    drawHorizontalLine(dc, clientRect.left, clientRect.right, topPanelY + topPanelHeight - 1, kUiLineSoft);
+
+    if (workspace_.browserVisible)
+    {
+        const int browserDividerX = kOuterPadding + kBrowserWidth + (kGap / 2);
+        drawVerticalLine(dc, browserDividerX, workspaceTop, clientRect.bottom - kOuterPadding, kUiLineSoft);
+    }
+
+    const int timePanelX = 22;
+    const int timePanelY = topPanelY + 12;
+    const int timePanelWidth = 210;
+    const int displayHeight = 50;
+    const int meterY = timePanelY + displayHeight + 8;
+    const int meterHeight = 34;
+    const int spectrumPanelX = timePanelX + timePanelWidth + 14;
+    const int spectrumPanelWidth = 140;
+    const int spectrumPanelHeight = displayHeight + meterHeight + 8;
+    const int transportX = spectrumPanelX + spectrumPanelWidth + 28;
+    const int transportY = topPanelY + 18;
+    const int patternClusterWidth = 154;
+    const int patternClusterX =
+        std::min(
+            clientRect.right - kOuterPadding - patternClusterWidth - 20,
+            std::max(transportX + 320, clientRect.right - 460));
+
+    RECT timeDisplayRect{timePanelX, timePanelY, timePanelX + timePanelWidth, timePanelY + displayHeight};
+    fillRectColor(dc, timeDisplayRect, RGB(83, 101, 103));
+    drawSurfaceFrame(dc, timeDisplayRect, RGB(73, 88, 91));
+
+    const int totalCentiseconds = std::max(0, static_cast<int>(visibleState_.timelineSeconds * 100.0 + 0.5));
+    const int minutes = totalCentiseconds / 6000;
+    const int seconds = (totalCentiseconds / 100) % 60;
+    const int centiseconds = totalCentiseconds % 100;
+    char timeBuffer[32]{};
+    std::snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d:%02d", minutes, seconds, centiseconds);
+
+    static HFONT timeFont = CreateFontA(
+        34,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        "Segoe UI");
+    static HFONT smallFont = CreateFontA(
+        11,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, timeFont);
+    RECT timeValueRect{timeDisplayRect.left + 14, timeDisplayRect.top + 2, timeDisplayRect.right - 10, timeDisplayRect.bottom - 4};
+    SetTextColor(dc, RGB(230, 239, 241));
+    DrawTextA(dc, timeBuffer, -1, &timeValueRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(dc, smallFont);
+    RECT timeModeRect{timeDisplayRect.right - 54, timeDisplayRect.top + 3, timeDisplayRect.right - 8, timeDisplayRect.top + 16};
+    SetTextColor(dc, RGB(210, 219, 223));
+    DrawTextA(dc, "M:S:CS", -1, &timeModeRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, oldFont);
+
+    RECT meterRect{timePanelX, meterY, timePanelX + timePanelWidth, meterY + meterHeight};
+    fillRectColor(dc, meterRect, RGB(62, 71, 76));
+    drawSurfaceFrame(dc, meterRect, RGB(58, 66, 70));
+
+    const double meterBase =
+        visibleState_.transportState == AudioEngine::TransportState::Playing
+            ? (0.40 + (0.26 * (0.5 + (0.5 * std::sin((visibleState_.timelineSeconds * 4.0) + 0.35)))))
+            : (0.34 + (visibleState_.cpuLoadApprox * 0.18));
+    const int meterFillWidth = clampValue(static_cast<int>((timePanelWidth - 14) * meterBase), 30, timePanelWidth - 20);
+    RECT meterFillTop{meterRect.left + 8, meterRect.top + 6, meterRect.left + 8 + meterFillWidth, meterRect.top + 16};
+    RECT meterFillBottom{meterRect.left + 8, meterRect.top + 18, meterRect.left + 8 + meterFillWidth, meterRect.top + 28};
+    fillRectColor(dc, meterFillTop, RGB(232, 228, 216));
+    fillRectColor(dc, meterFillBottom, RGB(232, 228, 216));
+    drawHorizontalLine(dc, meterFillTop.left, meterFillTop.right, meterRect.top + 17, RGB(201, 196, 183));
+
+    RECT spectrumRect{spectrumPanelX, timePanelY, spectrumPanelX + spectrumPanelWidth, timePanelY + spectrumPanelHeight};
+    fillRectColor(dc, spectrumRect, RGB(74, 86, 91));
+    drawSurfaceFrame(dc, spectrumRect, RGB(73, 88, 91));
+
+    RECT spectrumInnerRect{spectrumRect.left + 6, spectrumRect.top + 6, spectrumRect.right - 6, spectrumRect.bottom - 6};
+    fillRectColor(dc, spectrumInnerRect, RGB(62, 71, 75));
+    drawHorizontalLine(dc, spectrumInnerRect.left, spectrumInnerRect.right, spectrumInnerRect.bottom - 22, RGB(87, 99, 103));
+
+    POINT spectrumPoints[16]{};
+    const int spectrumWidth = spectrumInnerRect.right - spectrumInnerRect.left;
+    const int spectrumHeight = spectrumInnerRect.bottom - spectrumInnerRect.top;
+    const double motionBase =
+        visibleState_.transportState == AudioEngine::TransportState::Playing
+            ? visibleState_.timelineSeconds
+            : (static_cast<double>(visibleState_.callbackCount % 512) * 0.013);
+    spectrumPoints[0] = POINT{spectrumInnerRect.left, spectrumInnerRect.bottom};
+    for (int index = 0; index < 14; ++index)
+    {
+        const double phase = motionBase + static_cast<double>(index) * 0.41;
+        const double composite =
+            (0.45 + (0.28 * std::sin(phase * 1.3)) + (0.20 * std::sin((phase * 2.7) + 1.1))) *
+            (0.62 + (0.22 * std::sin((phase * 0.7) + 0.4)));
+        const int amplitude = clampValue(static_cast<int>(composite * static_cast<double>(spectrumHeight - 18)), 8, spectrumHeight - 16);
+        const int x = spectrumInnerRect.left + ((spectrumWidth - 1) * index) / 13;
+        const int y = spectrumInnerRect.bottom - 8 - amplitude;
+        spectrumPoints[index + 1] = POINT{x, y};
+    }
+    spectrumPoints[15] = POINT{spectrumInnerRect.right, spectrumInnerRect.bottom};
+
+    HBRUSH spectrumBrush = CreateSolidBrush(RGB(216, 222, 223));
+    HPEN spectrumPen = CreatePen(PS_SOLID, 1, RGB(216, 222, 223));
+    HGDIOBJ oldSpectrumBrush = SelectObject(dc, spectrumBrush);
+    HGDIOBJ oldSpectrumPen = SelectObject(dc, spectrumPen);
+    Polygon(dc, spectrumPoints, 16);
+    SelectObject(dc, oldSpectrumPen);
+    SelectObject(dc, oldSpectrumBrush);
+    DeleteObject(spectrumPen);
+    DeleteObject(spectrumBrush);
+
+    RECT tempoFieldRect{transportX + 198, transportY + 4, transportX + 288, transportY + 42};
+    fillRectColor(dc, tempoFieldRect, RGB(208, 222, 227));
+    drawSurfaceFrame(dc, tempoFieldRect, RGB(184, 196, 201));
+
+    RECT patternFieldRect{patternClusterX + 34, transportY + 2, patternClusterX + 90, transportY + 42};
+    fillRectColor(dc, patternFieldRect, RGB(209, 222, 228));
+    drawSurfaceFrame(dc, patternFieldRect, RGB(184, 196, 201));
+
+    const int modeBarLeft = transportX - 2;
+    const int modeBarTop = transportY + 68;
+    const int modeBarWidth = std::max(160, std::min(332, patternClusterX - transportX - 40));
+    const int modeKnobPosition = workspace_.songMode ? static_cast<int>(modeBarWidth * 0.67) : static_cast<int>(modeBarWidth * 0.15);
+    RECT modeLineRect{modeBarLeft + 18, modeBarTop + 7, modeBarLeft + modeBarWidth, modeBarTop + 9};
+    fillRectColor(dc, modeLineRect, RGB(123, 138, 143));
+    RECT modeFillRect{modeLineRect.left, modeLineRect.top, modeLineRect.left + modeKnobPosition, modeLineRect.bottom};
+    fillRectColor(dc, modeFillRect, workspace_.songMode ? RGB(98, 109, 113) : RGB(240, 162, 75));
+
+    RECT knobRect{
+        modeLineRect.left + modeKnobPosition - 9,
+        modeBarTop,
+        modeLineRect.left + modeKnobPosition + 9,
+        modeBarTop + 18};
+    drawFilledCircle(dc, knobRect, RGB(59, 68, 73), RGB(46, 53, 58));
+    RECT knobHighlight{knobRect.left + 6, knobRect.top + 4, knobRect.left + 10, knobRect.top + 12};
+    fillRectColor(dc, knobHighlight, RGB(209, 138, 62));
+}
+
+HBRUSH UI::resolveLabelBrush(HWND control, HDC dc) const
+{
+    static HBRUSH toolbarBrush = CreateSolidBrush(kUiAnthracite);
+    static HBRUSH infoBrush = CreateSolidBrush(blendColor(kUiGraphite, kUiAnthracite, 1, 3));
+    static HBRUSH bodyBrush = CreateSolidBrush(blendColor(kUiPetrol, kUiShadow, 1, 4));
+    static HBRUSH fieldBrush = CreateSolidBrush(RGB(208, 222, 227));
+
+    SetBkMode(dc, TRANSPARENT);
+
+    const int controlId = GetDlgCtrlID(control);
+    COLORREF textColor = kUiTextSoft;
+    HBRUSH brush = bodyBrush;
+
+    switch (controlId)
+    {
+    case IdLabelTempo:
+    case IdLabelPattern:
+        textColor = RGB(79, 92, 99);
+        brush = fieldBrush;
+        break;
+
+    case IdLabelSystem:
+        textColor = kUiTextSoft;
+        brush = toolbarBrush;
+        break;
+
+    case IdLabelSnap:
+        textColor = kUiText;
+        brush = toolbarBrush;
+        break;
+
+    case IdLabelStatus:
+        textColor = isControlActive(IdButtonPlay) ? kUiLime : kUiText;
+        brush = infoBrush;
+        break;
+
+    case IdLabelProjectSummary:
+        textColor = kUiText;
+        brush = infoBrush;
+        break;
+
+    case IdLabelDocument:
+    case IdLabelSelection:
+    case IdLabelContext:
+        textColor = kUiTextSoft;
+        brush = infoBrush;
+        break;
+
+    case IdLabelHints:
+        textColor = kUiTextSoft;
+        brush = bodyBrush;
+        break;
+
+    default:
+        textColor = kUiTextSoft;
+        brush = bodyBrush;
+        break;
+    }
+
+    SetTextColor(dc, textColor);
+    return brush;
+}
+
+bool UI::isControlActive(WORD controlId) const
+{
+    switch (controlId)
+    {
+    case IdButtonEngineStart:
+        return visibleState_.engineState == AudioEngine::EngineState::Running;
+
+    case IdButtonPlay:
+        return visibleState_.transportState == AudioEngine::TransportState::Playing;
+
+    case IdButtonRecord:
+        return workspace_.recordArmed;
+
+    case IdButtonPatSong:
+        return workspace_.songMode;
+
+    case IdButtonBrowser:
+        return workspace_.browserVisible;
+
+    case IdButtonChannelRack:
+        return workspace_.channelRackVisible;
+
+    case IdButtonPianoRoll:
+        return workspace_.pianoRollVisible;
+
+    case IdButtonPlaylist:
+        return workspace_.playlistVisible;
+
+    case IdButtonMixer:
+        return workspace_.mixerVisible;
+
+    case IdButtonPlugin:
+        return workspace_.pluginVisible;
+
+    case IdCheckboxAutomation:
+        return visibleState_.automationEnabled;
+
+    case IdCheckboxPdc:
+        return visibleState_.pdcEnabled;
+
+    case IdCheckboxAnticipative:
+        return visibleState_.anticipativeProcessingEnabled;
+
+    default:
+        return false;
+    }
+}
+
+bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
+{
+    if (drawItem.CtlType != ODT_BUTTON)
+    {
+        return false;
+    }
+
+    const WORD controlId = static_cast<WORD>(drawItem.CtlID);
+    const bool active = isControlActive(controlId);
+    const bool pressed = (drawItem.itemState & ODS_SELECTED) != 0;
+    const bool disabled = (drawItem.itemState & ODS_DISABLED) != 0;
+    const bool focused = (drawItem.itemState & ODS_FOCUS) != 0;
+    const bool isMenuStripButton =
+        controlId >= IdButtonMenuFile && controlId <= IdButtonMenuHelp;
+    const bool isQuickAccessButton =
+        controlId == IdButtonPianoRoll ||
+        controlId == IdButtonChannelRack ||
+        controlId == IdButtonMixer;
+    const bool isTransportButton =
+        controlId == IdButtonPlay ||
+        controlId == IdButtonStopTransport;
+    const bool isPatternNavButton =
+        controlId == IdButtonPatternPrev ||
+        controlId == IdButtonPatternNext;
+    const bool isLegacyToggle =
+        controlId == IdCheckboxAutomation ||
+        controlId == IdCheckboxPdc ||
+        controlId == IdCheckboxAnticipative;
+
+    RECT rect = drawItem.rcItem;
+    char label[96]{};
+    GetWindowTextA(drawItem.hwndItem, label, static_cast<int>(sizeof(label)));
+    SetBkMode(drawItem.hDC, TRANSPARENT);
+    static HFONT menuFont = CreateFontA(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT moduleFont = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT smallBoldFont = CreateFontA(12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    HGDIOBJ oldFont = nullptr;
+
+    if (isMenuStripButton)
+    {
+        fillRectColor(drawItem.hDC, rect, pressed ? RGB(46, 53, 56) : RGB(56, 64, 67));
+        oldFont = SelectObject(drawItem.hDC, menuFont);
+        SetTextColor(drawItem.hDC, disabled ? RGB(126, 135, 140) : RGB(229, 236, 239));
+        RECT textRect{rect.left + 4, rect.top, rect.right - 2, rect.bottom};
+        DrawTextA(drawItem.hDC, label, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(drawItem.hDC, oldFont);
+        return true;
+    }
+
+    if (controlId == IdButtonPatSong)
+    {
+        HBRUSH shellBrush = CreateSolidBrush(RGB(61, 69, 74));
+        HPEN shellPen = CreatePen(PS_SOLID, 1, RGB(44, 51, 55));
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, shellBrush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, shellPen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
+        SelectObject(drawItem.hDC, oldPen);
+        SelectObject(drawItem.hDC, oldBrush);
+        DeleteObject(shellPen);
+        DeleteObject(shellBrush);
+
+        RECT patRect{rect.left + 2, rect.top + 2, rect.right - 2, rect.top + ((rect.bottom - rect.top) / 2)};
+        RECT songRect{rect.left + 2, patRect.bottom, rect.right - 2, rect.bottom - 2};
+        const bool patternActive = !workspace_.songMode;
+        fillRectColor(drawItem.hDC, patRect, patternActive ? RGB(240, 162, 75) : RGB(39, 48, 57));
+        fillRectColor(drawItem.hDC, songRect, workspace_.songMode ? RGB(240, 162, 75) : RGB(39, 48, 57));
+        drawHorizontalLine(drawItem.hDC, patRect.left, patRect.right, patRect.bottom, RGB(46, 53, 58));
+
+        oldFont = SelectObject(drawItem.hDC, smallBoldFont);
+        SetTextColor(drawItem.hDC, patternActive ? RGB(59, 49, 41) : RGB(138, 150, 156));
+        DrawTextA(drawItem.hDC, "PAT", -1, &patRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(drawItem.hDC, workspace_.songMode ? RGB(59, 49, 41) : RGB(138, 150, 156));
+        DrawTextA(drawItem.hDC, "SONG", -1, &songRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(drawItem.hDC, oldFont);
+        return true;
+    }
+
+    if (isTransportButton)
+    {
+        COLORREF buttonFill = pressed ? RGB(48, 56, 61) : RGB(58, 66, 72);
+        HBRUSH brush = CreateSolidBrush(buttonFill);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(42, 49, 54));
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 14, 14);
+        SelectObject(drawItem.hDC, oldPen);
+        SelectObject(drawItem.hDC, oldBrush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+
+        RECT iconRect{
+            rect.left + ((rect.right - rect.left - kToolbarGlyphSize) / 2),
+            rect.top + ((rect.bottom - rect.top - kToolbarGlyphSize) / 2),
+            rect.left + ((rect.right - rect.left - kToolbarGlyphSize) / 2) + kToolbarGlyphSize,
+            rect.top + ((rect.bottom - rect.top - kToolbarGlyphSize) / 2) + kToolbarGlyphSize};
+        drawToolbarGlyph(drawItem.hDC, controlId, iconRect, RGB(216, 224, 227), active);
+        return true;
+    }
+
+    if (controlId == IdButtonRecord)
+    {
+        fillRectColor(drawItem.hDC, rect, RGB(93, 111, 113));
+        RECT outerRect{rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1};
+        drawFilledCircle(drawItem.hDC, outerRect, RGB(74, 83, 88), RGB(60, 68, 73));
+        RECT innerRect{rect.left + 7, rect.top + 7, rect.right - 7, rect.bottom - 7};
+        drawFilledCircle(drawItem.hDC, innerRect, RGB(225, 92, 77), RGB(197, 123, 104));
+        return true;
+    }
+
+    if (controlId == IdButtonTempoDown || controlId == IdButtonTempoUp)
+    {
+        fillRectColor(drawItem.hDC, rect, RGB(93, 111, 113));
+        return true;
+    }
+
+    if (isPatternNavButton)
+    {
+        fillRectColor(drawItem.hDC, rect, pressed ? RGB(52, 60, 66) : RGB(62, 71, 77));
+        drawSurfaceFrame(drawItem.hDC, rect, RGB(50, 58, 63));
+        if (controlId == IdButtonPatternPrev)
+        {
+            POINT arrow[3]{
+                POINT{rect.left + 20, rect.top + 10},
+                POINT{rect.left + 12, rect.top + ((rect.bottom - rect.top) / 2)},
+                POINT{rect.left + 20, rect.bottom - 10}};
+            HBRUSH arrowBrush = CreateSolidBrush(RGB(225, 232, 235));
+            HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(225, 232, 235));
+            HGDIOBJ oldArrowBrush = SelectObject(drawItem.hDC, arrowBrush);
+            HGDIOBJ oldArrowPen = SelectObject(drawItem.hDC, arrowPen);
+            Polygon(drawItem.hDC, arrow, 3);
+            SelectObject(drawItem.hDC, oldArrowPen);
+            SelectObject(drawItem.hDC, oldArrowBrush);
+            DeleteObject(arrowPen);
+            DeleteObject(arrowBrush);
+        }
+        else
+        {
+            drawHorizontalLine(drawItem.hDC, rect.left + 10, rect.right - 10, rect.top + ((rect.bottom - rect.top) / 2), RGB(225, 232, 235));
+            drawVerticalLine(drawItem.hDC, rect.left + ((rect.right - rect.left) / 2), rect.top + 10, rect.bottom - 10, RGB(225, 232, 235));
+        }
+        return true;
+    }
+
+    if (isQuickAccessButton)
+    {
+        const COLORREF fillColor = active ? RGB(66, 76, 82) : RGB(74, 84, 89);
+        fillRectColor(drawItem.hDC, rect, fillColor);
+        drawSurfaceFrame(drawItem.hDC, rect, RGB(57, 66, 71));
+        oldFont = SelectObject(drawItem.hDC, moduleFont);
+        SetTextColor(drawItem.hDC, disabled ? RGB(118, 126, 132) : RGB(227, 234, 237));
+        RECT textRect{rect.left + 4, rect.top + 4, rect.right - 4, rect.bottom - 4};
+        DrawTextA(drawItem.hDC, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+        SelectObject(drawItem.hDC, oldFont);
+        return true;
+    }
+
+    if (isLegacyToggle)
+    {
+        fillRectColor(drawItem.hDC, rect, RGB(61, 69, 74));
+        drawSurfaceFrame(drawItem.hDC, rect, active ? RGB(166, 240, 106) : RGB(74, 85, 96));
+        SetTextColor(drawItem.hDC, active ? RGB(166, 240, 106) : RGB(199, 205, 211));
+        DrawTextA(drawItem.hDC, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return true;
+    }
+
+    COLORREF outerColor = pressed ? kUiShadow : blendColor(kUiAnthracite, kUiShadow, 1, 4);
+    COLORREF fillColor = active ? blendColor(kUiAnthracite, kUiPetrol, 1, 2) : kUiAnthracite;
+    if (pressed)
+    {
+        fillColor = blendColor(fillColor, kUiShadow, 1, 3);
+    }
+
+    fillRectColor(drawItem.hDC, rect, outerColor);
+    RECT innerRect{rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1};
+    fillRectColor(drawItem.hDC, innerRect, fillColor);
+    drawSurfaceFrame(drawItem.hDC, innerRect, active ? blendColor(kUiLime, kUiLine, 1, 3) : kUiLineSoft);
+
+    const COLORREF textColor =
+        disabled ? kUiTextDim :
+        active ? kUiLime :
+        kUiText;
+    SetTextColor(drawItem.hDC, textColor);
+    DrawTextA(drawItem.hDC, label, -1, &innerRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (focused)
+    {
+        RECT focusRect{rect.left + 3, rect.top + 3, rect.right - 3, rect.bottom - 3};
+        DrawFocusRect(drawItem.hDC, &focusRect);
+    }
+
+    return true;
+}
+
 void UI::drawSurfaceHeader(HDC dc, const RECT& rect, const std::string& title, const std::string& subtitle) const
 {
     RECT headerRect{rect.left, rect.top, rect.right, rect.top + kSurfaceHeaderHeight};
-    HBRUSH headerBrush = CreateSolidBrush(RGB(43, 49, 58));
-    FillRect(dc, &headerRect, headerBrush);
-    DeleteObject(headerBrush);
+    fillRectColor(dc, headerRect, blendColor(kUiAnthracite, kUiPetrol, 1, 4));
+    drawHorizontalLine(dc, rect.left, rect.right, headerRect.bottom - 1, kUiLineSoft);
 
     RECT titleRect{rect.left + 8, rect.top + 3, rect.right - 8, rect.top + kSurfaceHeaderHeight - 2};
-    SetTextColor(dc, RGB(244, 244, 244));
+    SetTextColor(dc, kUiText);
     DrawTextA(dc, title.c_str(), -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     if (!subtitle.empty())
     {
         RECT subtitleRect{rect.right - 280, rect.top + 3, rect.right - 8, rect.top + kSurfaceHeaderHeight - 2};
-        SetTextColor(dc, RGB(173, 181, 193));
+        SetTextColor(dc, kUiTextSoft);
         DrawTextA(dc, subtitle.c_str(), -1, &subtitleRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
 }
