@@ -24,6 +24,17 @@ namespace
     constexpr COLORREF kUiLimeDim = RGB(119, 164, 84);
     constexpr COLORREF kUiRedAccent = RGB(140, 88, 92);
     constexpr COLORREF kUiShadow = RGB(25, 29, 34);
+    constexpr COLORREF kFlToolbarBase = RGB(89, 98, 103);
+    constexpr COLORREF kFlToolbarBorder = RGB(64, 71, 76);
+    constexpr COLORREF kFlPanelDark = RGB(51, 58, 63);
+    constexpr COLORREF kFlPanelDarker = RGB(40, 46, 50);
+    constexpr COLORREF kFlPanelHighlight = RGB(107, 117, 121);
+    constexpr COLORREF kFlOrange = RGB(240, 162, 75);
+    constexpr COLORREF kFlOrangeDeep = RGB(213, 131, 57);
+    constexpr COLORREF kFlLcdFill = RGB(211, 222, 226);
+    constexpr COLORREF kFlLcdBorder = RGB(184, 195, 199);
+    constexpr COLORREF kFlLcdText = RGB(75, 84, 89);
+    constexpr COLORREF kFlClockPassive = RGB(77, 85, 89);
 
     constexpr int kOuterPadding = 12;
     constexpr int kGap = 8;
@@ -47,6 +58,11 @@ namespace
     constexpr int kPlaylistTimelineHeight = 28;
     constexpr int kPlaylistTrackHeaderWidth = 138;
     constexpr int kToolbarGlyphSize = 13;
+    constexpr int kTempoDisplayWidth = 108;
+    constexpr int kTempoDisplayHeight = 38;
+    constexpr int kChronometerWidth = 42;
+    constexpr int kChronometerHeight = 38;
+    constexpr int kChronometerGap = 8;
 
     constexpr const char* kBrowserTabs[kBrowserTabCount] = {
         "Project",
@@ -56,6 +72,16 @@ namespace
     constexpr const char* kNoteNames[12] = {
         "C", "C#", "D", "D#", "E", "F",
         "F#", "G", "G#", "A", "A#", "B"};
+
+    double clampTempoBpm(double bpm)
+    {
+        return std::clamp(bpm, 10.0, 522.0);
+    }
+
+    double roundTempoBpm(double bpm)
+    {
+        return std::round(clampTempoBpm(bpm) * 1000.0) / 1000.0;
+    }
 
     void fillRectColor(HDC dc, const RECT& rect, COLORREF color)
     {
@@ -335,6 +361,10 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_COMMAND:
         if (ui != nullptr)
         {
+            if (reinterpret_cast<HWND>(lParam) == ui->tempoEditHwnd_)
+            {
+                return 0;
+            }
             ui->handleCommand(static_cast<WORD>(LOWORD(wParam)));
             return 0;
         }
@@ -395,6 +425,7 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_DESTROY:
         if (ui != nullptr)
         {
+            ui->tempoEditHwnd_ = nullptr;
             ui->destroyDetachedWindows();
             ui->stopUiTimer();
         }
@@ -569,6 +600,160 @@ LRESULT CALLBACK UI::DetachedPaneProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     }
 
     return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK UI::TempoControlProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UI* ui = reinterpret_cast<UI*>(GetWindowLongPtrA(GetParent(hwnd), GWLP_USERDATA));
+    if (ui == nullptr || ui->tempoControlProc_ == nullptr)
+    {
+        return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+    }
+
+    switch (uMsg)
+    {
+    case WM_LBUTTONDBLCLK:
+        ui->beginTempoInlineEdit();
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        if (ui->tempoEditHwnd_ != nullptr)
+        {
+            ui->endTempoInlineEdit(true);
+        }
+
+        SetFocus(hwnd);
+        SetCapture(hwnd);
+        ui->tempoDragActive_ = true;
+        ui->tempoDragFineAdjust_ = ui->isTempoFineTuneHit(hwnd, GET_X_LPARAM(lParam));
+        ui->tempoDragMoved_ = false;
+        ui->tempoDragOrigin_ = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ui->tempoDragStartBpm_ = ui->workspace_.tempoBpm;
+        ui->tempoDragLastAppliedBpm_ = ui->workspace_.tempoBpm;
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (ui->tempoDragActive_ && GetCapture() == hwnd)
+        {
+            const int deltaY = ui->tempoDragOrigin_.y - GET_Y_LPARAM(lParam);
+            double nextTempo = ui->tempoDragStartBpm_;
+
+            if (ui->tempoDragFineAdjust_)
+            {
+                nextTempo = roundTempoBpm(ui->tempoDragStartBpm_ + (static_cast<double>(deltaY) * 0.001));
+                ui->tempoDragMoved_ = ui->tempoDragMoved_ || std::abs(deltaY) >= 1;
+            }
+            else
+            {
+                const int wholeStepDelta = deltaY / 4;
+                const double fractionalPart =
+                    ui->tempoDragStartBpm_ - std::floor(ui->tempoDragStartBpm_ + 0.0001);
+                nextTempo = roundTempoBpm(std::floor(ui->tempoDragStartBpm_ + 0.0001) + wholeStepDelta + fractionalPart);
+                ui->tempoDragMoved_ = ui->tempoDragMoved_ || std::abs(deltaY) >= 4;
+            }
+
+            if (std::abs(nextTempo - ui->tempoDragLastAppliedBpm_) >= 0.0005)
+            {
+                ui->workspace_.tempoBpm = nextTempo;
+                ui->tempoDragLastAppliedBpm_ = nextTempo;
+                ui->requestTempoChange(nextTempo);
+                ui->updateTransportControls();
+            }
+            return 0;
+        }
+        break;
+
+    case WM_LBUTTONUP:
+        if (ui->tempoDragActive_)
+        {
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            const int clientHeight = static_cast<int>(clientRect.bottom - clientRect.top);
+            const int edgeBand = std::max(7, clientHeight / 4);
+            const int releaseY = GET_Y_LPARAM(lParam);
+            const bool fineAdjust = ui->tempoDragFineAdjust_;
+            const bool moved = ui->tempoDragMoved_;
+
+            ui->tempoDragActive_ = false;
+            ui->tempoDragFineAdjust_ = false;
+            ui->tempoDragMoved_ = false;
+            if (GetCapture() == hwnd)
+            {
+                ReleaseCapture();
+            }
+
+            if (!moved)
+            {
+                if (releaseY <= edgeBand)
+                {
+                    ui->applyTempoStep(fineAdjust, fineAdjust ? 0.001 : 1.0);
+                }
+                else if (releaseY >= (clientHeight - edgeBand))
+                {
+                    ui->applyTempoStep(fineAdjust, fineAdjust ? -0.001 : -1.0);
+                }
+                else
+                {
+                    ui->beginTempoInlineEdit();
+                }
+            }
+            return 0;
+        }
+        break;
+
+    case WM_CAPTURECHANGED:
+        ui->tempoDragActive_ = false;
+        ui->tempoDragFineAdjust_ = false;
+        ui->tempoDragMoved_ = false;
+        break;
+
+    case WM_RBUTTONUP:
+    {
+        POINT screenPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ClientToScreen(hwnd, &screenPoint);
+        ui->showTempoContextMenu(screenPoint);
+        return 0;
+    }
+
+    default:
+        break;
+    }
+
+    return CallWindowProcA(ui->tempoControlProc_, hwnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK UI::TempoEditProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UI* ui = reinterpret_cast<UI*>(GetWindowLongPtrA(GetParent(hwnd), GWLP_USERDATA));
+    if (ui == nullptr || ui->tempoEditProc_ == nullptr)
+    {
+        return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+    }
+
+    switch (uMsg)
+    {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN)
+        {
+            ui->endTempoInlineEdit(true);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE)
+        {
+            ui->endTempoInlineEdit(false);
+            return 0;
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        ui->endTempoInlineEdit(true);
+        return 0;
+
+    default:
+        break;
+    }
+
+    return CallWindowProcA(ui->tempoEditProc_, hwnd, uMsg, wParam, lParam);
 }
 
 void UI::registerWindowClass()
@@ -768,6 +953,7 @@ void UI::createControls()
     stopTransportButton_ = CreateWindowA("BUTTON", "Stop", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonStopTransport), hInstance_, nullptr);
     recordButton_ = CreateWindowA("BUTTON", "Rec", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonRecord), hInstance_, nullptr);
     patSongButton_ = CreateWindowA("BUTTON", "Song", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatSong), hInstance_, nullptr);
+    chronoButton_ = CreateWindowA("BUTTON", "Clock", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonChronometer), hInstance_, nullptr);
     tempoDownButton_ = CreateWindowA("BUTTON", "-", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonTempoDown), hInstance_, nullptr);
     tempoUpButton_ = CreateWindowA("BUTTON", "+", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonTempoUp), hInstance_, nullptr);
     patternPrevButton_ = CreateWindowA("BUTTON", "<", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatternPrev), hInstance_, nullptr);
@@ -798,7 +984,7 @@ void UI::createControls()
     anticipativeCheckbox_ = CreateWindowA("BUTTON", "Anticipative", checkboxStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdCheckboxAnticipative), hInstance_, nullptr);
 
     statusLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelStatus), hInstance_, nullptr);
-    tempoLabel_ = CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD | SS_CENTER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelTempo), hInstance_, nullptr);
+    tempoLabel_ = CreateWindowA("BUTTON", "", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonTempoDisplay), hInstance_, nullptr);
     patternLabel_ = CreateWindowA("STATIC", "", WS_VISIBLE | WS_CHILD | SS_CENTER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPattern), hInstance_, nullptr);
     snapLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelSnap), hInstance_, nullptr);
     systemLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelSystem), hInstance_, nullptr);
@@ -845,7 +1031,7 @@ void UI::createControls()
             [](HWND button) { return button == nullptr; });
 
     if (missingMenuButton || engineStartButton_ == nullptr || engineStopButton_ == nullptr || playButton_ == nullptr ||
-        stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr ||
+        stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr || chronoButton_ == nullptr ||
         tempoDownButton_ == nullptr || tempoUpButton_ == nullptr || patternPrevButton_ == nullptr ||
         patternNextButton_ == nullptr || snapPrevButton_ == nullptr || snapNextButton_ == nullptr ||
         browserButton_ == nullptr || channelRackButton_ == nullptr || pianoRollButton_ == nullptr ||
@@ -876,6 +1062,7 @@ void UI::createControls()
     static HFONT patternFont = CreateFontA(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     SendMessageA(tempoLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(numericFont), TRUE);
     SendMessageA(patternLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(patternFont), TRUE);
+    tempoControlProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(tempoLabel_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&UI::TempoControlProc)));
 
     layoutControls();
 }
@@ -917,13 +1104,18 @@ void UI::layoutControls()
     const int patternClusterX =
         std::min(
             width - kOuterPadding - patternClusterWidth - 20,
-            std::max(transportX + 320, width - 460));
+            std::max(transportX + 372, width - 460));
 
-    MoveWindow(patSongButton_, transportX, transportY + 2, 48, 56, TRUE);
-    MoveWindow(playButton_, transportX + 58, transportY + 6, 44, 36, TRUE);
-    MoveWindow(stopTransportButton_, transportX + 104, transportY + 6, 44, 36, TRUE);
-    MoveWindow(recordButton_, transportX + 156, transportY + 7, 32, 32, TRUE);
-    MoveWindow(tempoLabel_, transportX + 198, transportY + 4, 90, 38, TRUE);
+    MoveWindow(patSongButton_, transportX, transportY + 2, 52, 56, TRUE);
+    MoveWindow(playButton_, transportX + 62, transportY + 6, 46, 36, TRUE);
+    MoveWindow(stopTransportButton_, transportX + 110, transportY + 6, 46, 36, TRUE);
+    MoveWindow(recordButton_, transportX + 164, transportY + 7, 34, 34, TRUE);
+    MoveWindow(tempoLabel_, transportX + 208, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+    MoveWindow(chronoButton_, transportX + 208 + kTempoDisplayWidth + kChronometerGap, transportY + 4, kChronometerWidth, kChronometerHeight, TRUE);
+    if (tempoEditHwnd_ != nullptr)
+    {
+        MoveWindow(tempoEditHwnd_, transportX + 208, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+    }
 
     MoveWindow(patternPrevButton_, patternClusterX, transportY + 2, 32, 40, TRUE);
     MoveWindow(patternLabel_, patternClusterX + 34, transportY + 2, 56, 40, TRUE);
@@ -938,6 +1130,7 @@ void UI::layoutControls()
     ShowWindow(stopTransportButton_, SW_SHOW);
     ShowWindow(recordButton_, SW_SHOW);
     ShowWindow(tempoLabel_, SW_SHOW);
+    ShowWindow(chronoButton_, SW_SHOW);
     ShowWindow(patternPrevButton_, SW_SHOW);
     ShowWindow(patternLabel_, SW_SHOW);
     ShowWindow(patternNextButton_, SW_SHOW);
@@ -1417,8 +1610,12 @@ void UI::refreshFromEngineSnapshot()
         visibleState_ = buildVisibleEngineState();
     }
 
-    workspace_.tempoBpm = std::max(10.0, std::min(522.0, engine_.getTransportInfo().tempoBpm));
+    if (!tempoDragActive_ && tempoEditHwnd_ == nullptr)
+    {
+        workspace_.tempoBpm = roundTempoBpm(engine_.getTransportInfo().tempoBpm);
+    }
     syncWorkspaceModel();
+    syncTransportLoopState();
 
     updateTransportControls();
     updateStatusLabel();
@@ -1538,6 +1735,7 @@ void UI::updateTransportControls()
     SetWindowTextA(playButton_, visibleState_.transportState == AudioEngine::TransportState::Playing ? "Pause" : "Play");
     SetWindowTextA(recordButton_, "Rec");
     SetWindowTextA(patSongButton_, workspace_.songMode ? "SONG" : "PAT");
+    SetWindowTextA(chronoButton_, workspace_.chronometerEnabled ? "CLK" : "OFF");
 
     char tempoBuffer[32]{};
     std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
@@ -1547,8 +1745,12 @@ void UI::updateTransportControls()
 
     InvalidateRect(engineStartButton_, nullptr, TRUE);
     InvalidateRect(playButton_, nullptr, TRUE);
+    InvalidateRect(stopTransportButton_, nullptr, TRUE);
     InvalidateRect(recordButton_, nullptr, TRUE);
     InvalidateRect(patSongButton_, nullptr, TRUE);
+    InvalidateRect(chronoButton_, nullptr, TRUE);
+    InvalidateRect(tempoLabel_, nullptr, TRUE);
+    InvalidateRect(patternLabel_, nullptr, TRUE);
     InvalidateRect(patternPrevButton_, nullptr, TRUE);
     InvalidateRect(patternNextButton_, nullptr, TRUE);
     InvalidateRect(channelRackButton_, nullptr, TRUE);
@@ -1628,11 +1830,13 @@ void UI::updateToggleStates()
 void UI::updateWindowTitle()
 {
     std::ostringstream oss;
+    char tempoBuffer[16]{};
+    std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
     oss
         << kWindowTitleBase
         << " | " << visibleState_.project.projectName
         << " | " << (workspace_.songMode ? "Song" : "Pattern")
-        << " | BPM " << static_cast<int>(workspace_.tempoBpm + 0.5)
+        << " | BPM " << tempoBuffer
         << " | Pattern " << workspace_.activePattern;
     SetWindowTextA(hwnd_, oss.str().c_str());
 }
@@ -1695,6 +1899,8 @@ void UI::requestTransportPlay()
         return;
     }
 
+    syncWorkspaceModel();
+    syncTransportLoopState();
     engine_.postCommand({AudioEngine::CommandType::PlayTransport});
 }
 
@@ -1740,8 +1946,329 @@ void UI::requestTempoChange(double bpm)
 {
     AudioEngine::EngineCommand command{};
     command.type = AudioEngine::CommandType::SetTempo;
-    command.doubleValue = std::max(10.0, std::min(522.0, bpm));
+    command.doubleValue = roundTempoBpm(bpm);
     engine_.postCommand(command);
+}
+
+void UI::toggleChronometer()
+{
+    workspace_.chronometerEnabled = !workspace_.chronometerEnabled;
+}
+
+void UI::syncTransportLoopState()
+{
+    const int sampleRate = visibleState_.sampleRate > 0 ? visibleState_.sampleRate : 48000;
+    const std::uint64_t loopStartSample = 0;
+    const double targetSpanSeconds =
+        workspace_.songMode ? getSongPlaybackLengthSeconds() : getPatternPlaybackLengthSeconds();
+    const std::uint64_t loopEndSample = static_cast<std::uint64_t>(
+        std::max(1.0, (targetSpanSeconds * static_cast<double>(sampleRate)) + 0.5));
+    const bool loopEnabled = !workspace_.songMode;
+
+    if (!transportLoopStateInitialized_ ||
+        syncedLoopEnabled_ != loopEnabled ||
+        syncedLoopStartSample_ != loopStartSample ||
+        syncedLoopEndSample_ != loopEndSample)
+    {
+        AudioEngine::EngineCommand command{};
+        command.type = AudioEngine::CommandType::ConfigureTransportLoop;
+        command.uintValue = loopStartSample;
+        command.secondaryUintValue = loopEndSample;
+        command.boolValue = loopEnabled;
+        engine_.postCommand(command);
+
+        transportLoopStateInitialized_ = true;
+        syncedLoopEnabled_ = loopEnabled;
+        syncedLoopStartSample_ = loopStartSample;
+        syncedLoopEndSample_ = loopEndSample;
+    }
+
+    if (loopEnabled && loopEndSample > 0 && visibleState_.transportSamplePosition >= loopEndSample)
+    {
+        AudioEngine::EngineCommand seekCommand{};
+        seekCommand.type = AudioEngine::CommandType::SetSamplePosition;
+        seekCommand.uintValue = visibleState_.transportSamplePosition % loopEndSample;
+        engine_.postCommand(seekCommand);
+    }
+}
+
+double UI::getPatternPlaybackLengthSeconds() const
+{
+    if (workspaceModel_.patterns.empty())
+    {
+        return 2.0;
+    }
+
+    const int patternIndex =
+        clampValue(workspace_.activePattern - 1, 0, static_cast<int>(workspaceModel_.patterns.size() - 1));
+    const PatternState& pattern = workspaceModel_.patterns[static_cast<std::size_t>(patternIndex)];
+    const double beats = static_cast<double>(std::max(1, pattern.lengthInBars)) * 4.0;
+    return std::max(0.5, (beats * 60.0) / std::max(1.0, workspace_.tempoBpm));
+}
+
+double UI::getSongPlaybackLengthSeconds() const
+{
+    double songLengthSeconds = 0.0;
+
+    for (const auto& track : visibleState_.project.tracks)
+    {
+        for (const auto& clip : track.clips)
+        {
+            songLengthSeconds = std::max(
+                songLengthSeconds,
+                clip.startTimeSeconds + clip.durationSeconds);
+        }
+    }
+
+    for (const auto& automation : workspaceModel_.automationLanes)
+    {
+        songLengthSeconds = std::max(
+            songLengthSeconds,
+            static_cast<double>(automation.startCell + automation.lengthCells) * 0.5);
+    }
+
+    return std::max(songLengthSeconds, getPatternPlaybackLengthSeconds());
+}
+
+double UI::getPlaybackProgressNormalized() const
+{
+    const double spanSeconds =
+        workspace_.songMode ? getSongPlaybackLengthSeconds() : getPatternPlaybackLengthSeconds();
+    if (spanSeconds <= 0.0)
+    {
+        return 0.0;
+    }
+
+    double playbackSeconds = std::max(0.0, visibleState_.timelineSeconds);
+    if (!workspace_.songMode)
+    {
+        playbackSeconds = std::fmod(playbackSeconds, spanSeconds);
+        if (playbackSeconds < 0.0)
+        {
+            playbackSeconds += spanSeconds;
+        }
+    }
+
+    return std::clamp(playbackSeconds / spanSeconds, 0.0, 1.0);
+}
+
+bool UI::isTempoFineTuneHit(HWND hwnd, int x) const
+{
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int arrowZoneWidth = 18;
+    const int fineZoneWidth = 34;
+    return x >= (rect.right - arrowZoneWidth - fineZoneWidth) && x < (rect.right - arrowZoneWidth);
+}
+
+void UI::applyTempoStep(bool fineAdjust, double delta)
+{
+    const double currentTempo = roundTempoBpm(workspace_.tempoBpm);
+    double nextTempo = currentTempo;
+
+    if (fineAdjust)
+    {
+        nextTempo = currentTempo + delta;
+    }
+    else
+    {
+        const double baseTempo = std::floor(currentTempo + 0.0001);
+        const double fineTune = currentTempo - baseTempo;
+        nextTempo = baseTempo + delta + fineTune;
+    }
+
+    workspace_.tempoBpm = roundTempoBpm(nextTempo);
+    requestTempoChange(workspace_.tempoBpm);
+    updateTransportControls();
+}
+
+void UI::beginTempoInlineEdit()
+{
+    if (tempoEditHwnd_ != nullptr)
+    {
+        SetFocus(tempoEditHwnd_);
+        SendMessageA(tempoEditHwnd_, EM_SETSEL, 0, -1);
+        return;
+    }
+
+    RECT rect{};
+    GetWindowRect(tempoLabel_, &rect);
+    MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&rect), 2);
+
+    tempoEditHwnd_ = CreateWindowA(
+        "EDIT",
+        "",
+        WS_VISIBLE | WS_CHILD | WS_BORDER | ES_CENTER | ES_AUTOHSCROLL,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        hwnd_,
+        nullptr,
+        hInstance_,
+        nullptr);
+
+    if (tempoEditHwnd_ == nullptr)
+    {
+        return;
+    }
+
+    static HFONT editFont = CreateFontA(
+        20,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        "Segoe UI");
+
+    char tempoBuffer[32]{};
+    std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
+    SetWindowTextA(tempoEditHwnd_, tempoBuffer);
+    SendMessageA(tempoEditHwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(editFont), TRUE);
+    tempoEditProc_ = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrA(tempoEditHwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&UI::TempoEditProc)));
+    SetFocus(tempoEditHwnd_);
+    SendMessageA(tempoEditHwnd_, EM_SETSEL, 0, -1);
+}
+
+void UI::endTempoInlineEdit(bool applyChanges)
+{
+    if (tempoEditHwnd_ == nullptr)
+    {
+        return;
+    }
+
+    HWND editHwnd = tempoEditHwnd_;
+    WNDPROC editProc = tempoEditProc_;
+    tempoEditHwnd_ = nullptr;
+    tempoEditProc_ = nullptr;
+
+    if (applyChanges)
+    {
+        char buffer[64]{};
+        GetWindowTextA(editHwnd, buffer, static_cast<int>(sizeof(buffer)));
+        std::stringstream parser(buffer);
+        double parsedTempo = 0.0;
+        parser >> parsedTempo;
+        if (!parser.fail())
+        {
+            workspace_.tempoBpm = roundTempoBpm(parsedTempo);
+            requestTempoChange(workspace_.tempoBpm);
+        }
+    }
+
+    if (editProc != nullptr)
+    {
+        SetWindowLongPtrA(editHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(editProc));
+    }
+    DestroyWindow(editHwnd);
+    updateTransportControls();
+}
+
+void UI::showTempoContextMenu(POINT screenPoint)
+{
+    enum : UINT
+    {
+        TempoMenuTypeValue = 1,
+        TempoMenuResetFineTune = 2,
+        TempoMenuFineUp = 3,
+        TempoMenuFineDown = 4,
+        TempoMenuPreset120 = 10,
+        TempoMenuPreset126 = 11,
+        TempoMenuPreset128 = 12,
+        TempoMenuPreset130 = 13,
+        TempoMenuPreset140 = 14
+    };
+
+    HMENU popupMenu = CreatePopupMenu();
+    if (popupMenu == nullptr)
+    {
+        return;
+    }
+
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuTypeValue, "Type in value...");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuResetFineTune, "Reset fine tune");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuFineUp, "Fine +0.001 BPM");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuFineDown, "Fine -0.001 BPM");
+    AppendMenuA(popupMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuPreset120, "120.000 BPM");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuPreset126, "126.000 BPM");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuPreset128, "128.000 BPM");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuPreset130, "130.000 BPM");
+    AppendMenuA(popupMenu, MF_STRING, TempoMenuPreset140, "140.000 BPM");
+
+    SetForegroundWindow(hwnd_);
+    const UINT selectedCommand = TrackPopupMenu(
+        popupMenu,
+        TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+        screenPoint.x,
+        screenPoint.y,
+        0,
+        hwnd_,
+        nullptr);
+    DestroyMenu(popupMenu);
+
+    switch (selectedCommand)
+    {
+    case TempoMenuTypeValue:
+        beginTempoInlineEdit();
+        break;
+
+    case TempoMenuResetFineTune:
+        workspace_.tempoBpm = std::floor(workspace_.tempoBpm + 0.0001);
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    case TempoMenuFineUp:
+        applyTempoStep(true, 0.001);
+        break;
+
+    case TempoMenuFineDown:
+        applyTempoStep(true, -0.001);
+        break;
+
+    case TempoMenuPreset120:
+        workspace_.tempoBpm = 120.000;
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    case TempoMenuPreset126:
+        workspace_.tempoBpm = 126.000;
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    case TempoMenuPreset128:
+        workspace_.tempoBpm = 128.000;
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    case TempoMenuPreset130:
+        workspace_.tempoBpm = 130.000;
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    case TempoMenuPreset140:
+        workspace_.tempoBpm = 140.000;
+        requestTempoChange(workspace_.tempoBpm);
+        updateTransportControls();
+        break;
+
+    default:
+        break;
+    }
 }
 
 void UI::requestAddTrack()
@@ -1936,6 +2463,10 @@ void UI::handleCommand(WORD commandId)
 
     case IdButtonRecord:
         workspace_.recordArmed = !workspace_.recordArmed;
+        break;
+
+    case IdButtonChronometer:
+        toggleChronometer();
         break;
 
     case IdButtonPatSong:
@@ -2140,5 +2671,4 @@ void UI::handleCommand(WORD commandId)
     layoutControls();
     refreshFromEngineSnapshot();
 }
-
 
