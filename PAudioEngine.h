@@ -126,6 +126,7 @@ public:
         SetTempo,
         SetTimelinePosition,
         SetSamplePosition,
+        ConfigureTransportLoop,
         ToggleAnticipativeProcessing,
         ToggleAutomation,
         TogglePdc,
@@ -248,6 +249,9 @@ public:
         double tempoBpm = 120.0;
         double timelineSeconds = 0.0;
         std::uint64_t samplePosition = 0;
+        bool loopEnabled = false;
+        std::uint64_t loopStartSample = 0;
+        std::uint64_t loopEndSample = 0;
         bool monitoringEnabled = true;
     };
 
@@ -699,6 +703,7 @@ public:
     void setTimelinePosition(double seconds);
     void setTempo(double bpm);
     void setSamplePosition(std::uint64_t samplePosition);
+    void configureTransportLoop(std::uint64_t startSample, std::uint64_t endSample, bool enabled);
 
     bool isPlaying() const noexcept;
     bool isMonitoring() const noexcept;
@@ -859,4 +864,5 @@ private:
     mutable std::mutex clipCacheMutex_;
     mutable std::mutex pluginMutex_;
 };
+
 
