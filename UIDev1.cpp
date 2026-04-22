@@ -1,10 +1,13 @@
 #include "PUI.h"
 
+#include <commdlg.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <sstream>
 #include <string>
@@ -42,7 +45,7 @@ namespace
     constexpr int kTransportHeight = 30;
     constexpr int kInfoStripHeight = 54;
     constexpr int kBrowserWidth = 286;
-    constexpr int kBrowserTabCount = 3;
+    constexpr int kBrowserTabCount = 1;
     constexpr int kBrowserTabHeight = 22;
     constexpr int kBrowserRowHeight = 28;
     constexpr int kBrowserIndentWidth = 16;
@@ -63,15 +66,40 @@ namespace
     constexpr int kChronometerWidth = 42;
     constexpr int kChronometerHeight = 38;
     constexpr int kChronometerGap = 8;
+    constexpr int kPlaylistMinVisibleTracks = 12;
 
     constexpr const char* kBrowserTabs[kBrowserTabCount] = {
-        "Project",
-        "Samples",
-        "Automation"};
+        "Project"};
+    constexpr WORD kPatternPopupSelectBase = 24000;
+    constexpr WORD kPatternPopupSelectLimit = 24999;
 
     constexpr const char* kNoteNames[12] = {
         "C", "C#", "D", "D#", "E", "F",
         "F#", "G", "G#", "A", "A#", "B"};
+
+    std::string chooseProjectFilePath(HWND owner, bool saveDialog, const std::string& initialPath)
+    {
+        char fileBuffer[4096]{};
+        const std::string initialValue = initialPath.empty() ? "session.dawproject" : initialPath;
+        std::snprintf(fileBuffer, sizeof(fileBuffer), "%s", initialValue.c_str());
+
+        OPENFILENAMEA dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = owner;
+        dialog.lpstrFilter =
+            "DAW Project (*.dawproject)\0*.dawproject\0"
+            "All Files (*.*)\0*.*\0\0";
+        dialog.lpstrFile = fileBuffer;
+        dialog.nMaxFile = static_cast<DWORD>(sizeof(fileBuffer));
+        dialog.lpstrDefExt = "dawproject";
+        dialog.Flags = OFN_EXPLORER | OFN_ENABLESIZING | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST;
+
+        const BOOL accepted = saveDialog
+            ? (dialog.Flags |= OFN_OVERWRITEPROMPT, GetSaveFileNameA(&dialog))
+            : (dialog.Flags |= OFN_FILEMUSTEXIST, GetOpenFileNameA(&dialog));
+
+        return accepted ? std::string(dialog.lpstrFile) : std::string{};
+    }
 
     double clampTempoBpm(double bpm)
     {
@@ -528,6 +556,130 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         ui->handleSurfaceMouseUp(hwnd, kind, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
 
+    case WM_MOUSEWHEEL:
+        if (kind == SurfaceKind::Playlist)
+        {
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            const bool ctrlPressed = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
+            const bool shiftPressed = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
+            const int leftInset = kPlaylistTrackHeaderWidth;
+            const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
+
+            if (ctrlPressed)
+            {
+                POINT wheelPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ScreenToClient(hwnd, &wheelPoint);
+
+                const int anchorPixel = std::max(0, static_cast<int>(wheelPoint.x) - leftInset);
+                const int previousColumnWidth = ui->playlistColumnWidth(visibleGridWidth);
+                const double anchorCell =
+                    static_cast<double>(ui->playlistScrollX_ + anchorPixel) /
+                    static_cast<double>(std::max(1, previousColumnWidth));
+
+                ui->cycleZoom(false, wheelDelta > 0 ? 1 : -1);
+                const int nextColumnWidth = ui->playlistColumnWidth(visibleGridWidth);
+                const int nextScrollX =
+                    static_cast<int>(std::round(anchorCell * static_cast<double>(nextColumnWidth))) - anchorPixel;
+                ui->scrollPlaylistTo(nextScrollX, ui->playlistScrollY_);
+            }
+            else if (shiftPressed)
+            {
+                ui->scrollPlaylistTo(
+                    ui->playlistScrollX_ - ((wheelDelta / WHEEL_DELTA) * std::max(24, ui->playlistColumnWidth(visibleGridWidth) / 2)),
+                    ui->playlistScrollY_);
+            }
+            else
+            {
+                ui->scrollPlaylistTo(ui->playlistScrollX_, ui->playlistScrollY_ - ((wheelDelta / WHEEL_DELTA) * kPlaylistLaneHeight * 3));
+            }
+            return 0;
+        }
+        if (kind == SurfaceKind::Browser)
+        {
+            const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            ui->scrollBrowserTo(ui->browserScrollY_ - ((wheelDelta / WHEEL_DELTA) * kBrowserRowHeight * 3));
+            return 0;
+        }
+        break;
+
+    case WM_VSCROLL:
+        if (kind == SurfaceKind::Browser || kind == SurfaceKind::Playlist)
+        {
+            const bool browserSurface = kind == SurfaceKind::Browser;
+            const int lineStep = browserSurface ? kBrowserRowHeight : kPlaylistLaneHeight;
+            SCROLLINFO info{};
+            info.cbSize = sizeof(info);
+            info.fMask = SIF_ALL;
+            GetScrollInfo(hwnd, SB_VERT, &info);
+
+            int nextPos = info.nPos;
+            switch (LOWORD(wParam))
+            {
+            case SB_LINEUP: nextPos -= lineStep; break;
+            case SB_LINEDOWN: nextPos += lineStep; break;
+            case SB_PAGEUP: nextPos -= static_cast<int>(info.nPage); break;
+            case SB_PAGEDOWN: nextPos += static_cast<int>(info.nPage); break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: nextPos = info.nTrackPos; break;
+            case SB_TOP: nextPos = info.nMin; break;
+            case SB_BOTTOM: nextPos = info.nMax; break;
+            default: break;
+            }
+
+            if (browserSurface)
+            {
+                ui->scrollBrowserTo(nextPos);
+            }
+            else
+            {
+                ui->scrollPlaylistTo(ui->playlistScrollX_, nextPos);
+            }
+            return 0;
+        }
+        break;
+
+    case WM_HSCROLL:
+        if (kind == SurfaceKind::Playlist)
+        {
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            const int leftInset = kPlaylistTrackHeaderWidth;
+            const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
+            const int lineStep = std::max(24, ui->playlistColumnWidth(visibleGridWidth) / 2);
+            SCROLLINFO info{};
+            info.cbSize = sizeof(info);
+            info.fMask = SIF_ALL;
+            GetScrollInfo(hwnd, SB_HORZ, &info);
+
+            int nextPos = info.nPos;
+            switch (LOWORD(wParam))
+            {
+            case SB_LINELEFT: nextPos -= lineStep; break;
+            case SB_LINERIGHT: nextPos += lineStep; break;
+            case SB_PAGELEFT: nextPos -= static_cast<int>(info.nPage); break;
+            case SB_PAGERIGHT: nextPos += static_cast<int>(info.nPage); break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: nextPos = info.nTrackPos; break;
+            case SB_LEFT: nextPos = info.nMin; break;
+            case SB_RIGHT: nextPos = info.nMax; break;
+            default: break;
+            }
+
+            ui->scrollPlaylistTo(nextPos, ui->playlistScrollY_);
+            return 0;
+        }
+        break;
+
+    case WM_DROPFILES:
+        if (kind == SurfaceKind::Browser)
+        {
+            ui->handleBrowserDrop(wParam);
+            return 0;
+        }
+        break;
+
     default:
         break;
     }
@@ -877,6 +1029,10 @@ void UI::createMainMenu()
 
     AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsPrev, "Previous Pattern");
     AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsNext, "Next Pattern");
+    AppendMenuA(patternsMenu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsAdd, "Add Pattern");
+    AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsClone, "Clone Pattern");
+    AppendMenuA(patternsMenu_, MF_STRING, IdMenuPatternsDelete, "Delete Pattern");
 
     AppendMenuA(viewMenu_, MF_STRING, IdMenuViewBrowser, "Browser\tAlt+F8");
     AppendMenuA(viewMenu_, MF_STRING, IdMenuViewChannelRack, "Channel Rack\tF6");
@@ -957,12 +1113,13 @@ void UI::createControls()
     playButton_ = CreateWindowA("BUTTON", "Play", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlay), hInstance_, nullptr);
     stopTransportButton_ = CreateWindowA("BUTTON", "Stop", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonStopTransport), hInstance_, nullptr);
     recordButton_ = CreateWindowA("BUTTON", "Rec", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonRecord), hInstance_, nullptr);
-    patSongButton_ = CreateWindowA("BUTTON", "Song", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatSong), hInstance_, nullptr);
+    patSongButton_ = CreateWindowA("BUTTON", "PAT", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatSong), hInstance_, nullptr);
+    songModeButton_ = CreateWindowA("BUTTON", "SONG", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonSongMode), hInstance_, nullptr);
     chronoButton_ = CreateWindowA("BUTTON", "Clock", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonChronometer), hInstance_, nullptr);
     tempoDownButton_ = CreateWindowA("BUTTON", "-", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonTempoDown), hInstance_, nullptr);
     tempoUpButton_ = CreateWindowA("BUTTON", "+", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonTempoUp), hInstance_, nullptr);
-    patternPrevButton_ = CreateWindowA("BUTTON", "<", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatternPrev), hInstance_, nullptr);
-    patternNextButton_ = CreateWindowA("BUTTON", ">", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatternNext), hInstance_, nullptr);
+    patternPrevButton_ = CreateWindowA("BUTTON", "", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatternPrev), hInstance_, nullptr);
+    patternNextButton_ = CreateWindowA("BUTTON", "", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPatternNext), hInstance_, nullptr);
     snapPrevButton_ = CreateWindowA("BUTTON", "<", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonSnapPrev), hInstance_, nullptr);
     snapNextButton_ = CreateWindowA("BUTTON", ">", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonSnapNext), hInstance_, nullptr);
     browserButton_ = CreateWindowA("BUTTON", "Browser", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonBrowser), hInstance_, nullptr);
@@ -1002,7 +1159,7 @@ void UI::createControls()
     browserTabPrevButton_ = CreateWindowA("BUTTON", "<", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonBrowserTabPrev), hInstance_, nullptr);
     browserTabNextButton_ = CreateWindowA("BUTTON", ">", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonBrowserTabNext), hInstance_, nullptr);
     browserHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelBrowserHeader), hInstance_, nullptr);
-    browserPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelBrowser), hInstance_, this);
+    browserPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER | WS_VSCROLL, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelBrowser), hInstance_, this);
     channelRackMenuButton_ = CreateWindowA("BUTTON", "v", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonMenuChannelRack), hInstance_, nullptr);
     channelHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelChannelHeader), hInstance_, nullptr);
     channelRackPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelChannelRack), hInstance_, this);
@@ -1017,10 +1174,10 @@ void UI::createControls()
     playlistMenuButton_ = CreateWindowA("BUTTON", "v", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonMenuPlaylist), hInstance_, nullptr);
     playlistZoomPrevButton_ = CreateWindowA("BUTTON", "-", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistZoomPrev), hInstance_, nullptr);
     playlistZoomNextButton_ = CreateWindowA("BUTTON", "+", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistZoomNext), hInstance_, nullptr);
-    playlistToolPrevButton_ = CreateWindowA("BUTTON", "<", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolPrev), hInstance_, nullptr);
-    playlistToolNextButton_ = CreateWindowA("BUTTON", ">", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolNext), hInstance_, nullptr);
+    playlistToolPrevButton_ = CreateWindowA("BUTTON", "Draw", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolPrev), hInstance_, nullptr);
+    playlistToolNextButton_ = CreateWindowA("BUTTON", "Slice", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolNext), hInstance_, nullptr);
     playlistHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylistHeader), hInstance_, nullptr);
-    playlistPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylist), hInstance_, this);
+    playlistPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER | WS_VSCROLL | WS_HSCROLL, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylist), hInstance_, this);
     mixerMenuButton_ = CreateWindowA("BUTTON", "v", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonMenuMixer), hInstance_, nullptr);
     mixerHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelMixerHeader), hInstance_, nullptr);
     mixerPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelMixer), hInstance_, this);
@@ -1036,7 +1193,7 @@ void UI::createControls()
             [](HWND button) { return button == nullptr; });
 
     if (missingMenuButton || engineStartButton_ == nullptr || engineStopButton_ == nullptr || playButton_ == nullptr ||
-        stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr || chronoButton_ == nullptr ||
+        stopTransportButton_ == nullptr || recordButton_ == nullptr || patSongButton_ == nullptr || songModeButton_ == nullptr || chronoButton_ == nullptr ||
         tempoDownButton_ == nullptr || tempoUpButton_ == nullptr || patternPrevButton_ == nullptr ||
         patternNextButton_ == nullptr || snapPrevButton_ == nullptr || snapNextButton_ == nullptr ||
         browserButton_ == nullptr || channelRackButton_ == nullptr || pianoRollButton_ == nullptr ||
@@ -1064,10 +1221,11 @@ void UI::createControls()
     }
 
     static HFONT numericFont = CreateFontA(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
-    static HFONT patternFont = CreateFontA(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
+    static HFONT patternFont = CreateFontA(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     SendMessageA(tempoLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(numericFont), TRUE);
     SendMessageA(patternLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(patternFont), TRUE);
     tempoControlProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(tempoLabel_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&UI::TempoControlProc)));
+    DragAcceptFiles(browserPanel_, FALSE);
 
     layoutControls();
 }
@@ -1101,38 +1259,49 @@ void UI::layoutControls()
 
     const int timePanelX = 22;
     const int timePanelWidth = 210;
-    const int spectrumPanelX = timePanelX + timePanelWidth + 14;
-    const int spectrumPanelWidth = 140;
-    const int transportX = spectrumPanelX + spectrumPanelWidth + 28;
+    const int transportX = timePanelX + timePanelWidth + 18;
     const int transportY = topPanelY + 18;
-    const int patternClusterWidth = 154;
+    const int patternClusterWidth = 484;
+    const int patternClusterMinX = transportX + 344;
+    const int patternClusterMaxX = std::max(kOuterPadding, width - kOuterPadding - patternClusterWidth);
     const int patternClusterX =
         std::min(
-            width - kOuterPadding - patternClusterWidth - 20,
-            std::max(transportX + 372, width - 460));
+            patternClusterMaxX,
+            std::max(patternClusterMinX, width - patternClusterWidth - 28));
 
-    MoveWindow(patSongButton_, transportX, transportY + 2, 52, 56, TRUE);
-    MoveWindow(playButton_, transportX + 62, transportY + 6, 46, 36, TRUE);
-    MoveWindow(stopTransportButton_, transportX + 110, transportY + 6, 46, 36, TRUE);
-    MoveWindow(recordButton_, transportX + 164, transportY + 7, 34, 34, TRUE);
-    MoveWindow(tempoLabel_, transportX + 208, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
-    MoveWindow(chronoButton_, transportX + 208 + kTempoDisplayWidth + kChronometerGap, transportY + 4, kChronometerWidth, kChronometerHeight, TRUE);
+    MoveWindow(playButton_, transportX, transportY + 6, 46, 36, TRUE);
+    MoveWindow(stopTransportButton_, transportX + 48, transportY + 6, 46, 36, TRUE);
+    MoveWindow(patSongButton_, transportX + 96, transportY + 6, 46, 36, TRUE);
+    MoveWindow(songModeButton_, transportX + 144, transportY + 6, 46, 36, TRUE);
+    MoveWindow(recordButton_, transportX + 198, transportY + 7, 34, 34, TRUE);
+    MoveWindow(tempoLabel_, transportX + 246, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+    MoveWindow(chronoButton_, transportX + 246 + kTempoDisplayWidth + kChronometerGap, transportY + 4, kChronometerWidth, kChronometerHeight, TRUE);
     if (tempoEditHwnd_ != nullptr)
     {
-        MoveWindow(tempoEditHwnd_, transportX + 208, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+        MoveWindow(tempoEditHwnd_, transportX + 246, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
     }
 
-    MoveWindow(patternPrevButton_, patternClusterX, transportY + 2, 32, 40, TRUE);
-    MoveWindow(patternLabel_, patternClusterX + 34, transportY + 2, 56, 40, TRUE);
-    MoveWindow(patternNextButton_, patternClusterX + 92, transportY + 2, 32, 40, TRUE);
+    int patternButtonX = patternClusterX;
+    MoveWindow(patternPrevButton_, patternButtonX, transportY + 6, 24, 34, TRUE);
+    patternButtonX += 26;
+    MoveWindow(patternLabel_, patternButtonX, transportY + 6, 110, 34, TRUE);
+    patternButtonX += 112;
+    MoveWindow(patternNextButton_, patternButtonX, transportY + 6, 24, 34, TRUE);
+    patternButtonX += 36;
+    MoveWindow(pianoRollButton_, patternButtonX, transportY + 6, 72, 34, TRUE);
+    patternButtonX += 74;
+    MoveWindow(channelRackButton_, patternButtonX, transportY + 6, 78, 34, TRUE);
+    patternButtonX += 80;
+    MoveWindow(mixerButton_, patternButtonX, transportY + 6, 60, 34, TRUE);
+    patternButtonX += 72;
+    MoveWindow(playlistToolPrevButton_, patternButtonX, transportY + 6, 58, 34, TRUE);
+    patternButtonX += 60;
+    MoveWindow(playlistToolNextButton_, patternButtonX, transportY + 6, 58, 34, TRUE);
 
-    MoveWindow(pianoRollButton_, patternClusterX, transportY + 50, 46, 42, TRUE);
-    MoveWindow(channelRackButton_, patternClusterX + 48, transportY + 50, 50, 42, TRUE);
-    MoveWindow(mixerButton_, patternClusterX + 100, transportY + 50, 44, 42, TRUE);
-
-    ShowWindow(patSongButton_, SW_SHOW);
     ShowWindow(playButton_, SW_SHOW);
     ShowWindow(stopTransportButton_, SW_SHOW);
+    ShowWindow(patSongButton_, SW_SHOW);
+    ShowWindow(songModeButton_, SW_SHOW);
     ShowWindow(recordButton_, SW_SHOW);
     ShowWindow(tempoLabel_, SW_SHOW);
     ShowWindow(chronoButton_, SW_SHOW);
@@ -1142,6 +1311,8 @@ void UI::layoutControls()
     ShowWindow(pianoRollButton_, SW_SHOW);
     ShowWindow(channelRackButton_, SW_SHOW);
     ShowWindow(mixerButton_, SW_SHOW);
+    ShowWindow(playlistToolPrevButton_, SW_SHOW);
+    ShowWindow(playlistToolNextButton_, SW_SHOW);
 
     ShowWindow(engineStartButton_, SW_HIDE);
     ShowWindow(engineStopButton_, SW_HIDE);
@@ -1190,8 +1361,6 @@ void UI::layoutControls()
     ShowWindow(playlistMenuButton_, SW_HIDE);
     ShowWindow(playlistZoomPrevButton_, SW_HIDE);
     ShowWindow(playlistZoomNextButton_, SW_HIDE);
-    ShowWindow(playlistToolPrevButton_, SW_HIDE);
-    ShowWindow(playlistToolNextButton_, SW_HIDE);
     ShowWindow(playlistHeaderLabel_, SW_HIDE);
     ShowWindow(mixerMenuButton_, SW_HIDE);
     ShowWindow(mixerHeaderLabel_, SW_HIDE);
@@ -1288,6 +1457,8 @@ void UI::layoutControls()
     ShowWindow(hintsLabel_, SW_HIDE);
 
     ensureDetachedWindows();
+    updateBrowserScrollBar();
+    updatePlaylistScrollBars();
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -1621,6 +1792,8 @@ void UI::stopUiTimer()
 void UI::refreshFromEngineSnapshot()
 {
     visibleState_ = buildVisibleEngineState();
+    displayedTimelineAnchorSeconds_ = std::max(0.0, visibleState_.timelineSeconds);
+    displayedTimelineAnchorClock_ = std::chrono::steady_clock::now();
     refreshPluginManagerState();
 
     if (!visibleState_.project.tracks.empty() && selectedTrackIndex_ >= visibleState_.project.tracks.size())
@@ -1635,6 +1808,8 @@ void UI::refreshFromEngineSnapshot()
     }
     syncWorkspaceModel();
     syncTransportLoopState();
+    updateBrowserScrollBar();
+    updatePlaylistScrollBars();
 
     updateTransportControls();
     updateStatusLabel();
@@ -1778,13 +1953,25 @@ void UI::updateTransportControls()
 {
     SetWindowTextA(playButton_, visibleState_.transportState == AudioEngine::TransportState::Playing ? "Pause" : "Play");
     SetWindowTextA(recordButton_, "Rec");
-    SetWindowTextA(patSongButton_, workspace_.songMode ? "SONG" : "PAT");
+    SetWindowTextA(patSongButton_, "PAT");
+    SetWindowTextA(songModeButton_, "SONG");
     SetWindowTextA(chronoButton_, workspace_.chronometerEnabled ? "CLK" : "OFF");
+    SetWindowTextA(playlistToolPrevButton_, "Draw");
+    SetWindowTextA(playlistToolNextButton_, "Slice");
 
     char tempoBuffer[32]{};
     std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
     setStaticText(tempoLabel_, tempoBuffer);
-    setStaticText(patternLabel_, std::to_string(workspace_.activePattern));
+    std::string activePatternLabel = "Pattern " + std::to_string(workspace_.activePattern);
+    for (const auto& pattern : workspaceModel_.patterns)
+    {
+        if (pattern.patternNumber == workspace_.activePattern && !pattern.name.empty())
+        {
+            activePatternLabel = pattern.name;
+            break;
+        }
+    }
+    setStaticText(patternLabel_, activePatternLabel);
     setStaticText(snapLabel_, "Snap " + currentSnapLabel());
 
     InvalidateRect(engineStartButton_, nullptr, TRUE);
@@ -1792,6 +1979,7 @@ void UI::updateTransportControls()
     InvalidateRect(stopTransportButton_, nullptr, TRUE);
     InvalidateRect(recordButton_, nullptr, TRUE);
     InvalidateRect(patSongButton_, nullptr, TRUE);
+    InvalidateRect(songModeButton_, nullptr, TRUE);
     InvalidateRect(chronoButton_, nullptr, TRUE);
     InvalidateRect(tempoLabel_, nullptr, TRUE);
     InvalidateRect(patternLabel_, nullptr, TRUE);
@@ -1800,6 +1988,8 @@ void UI::updateTransportControls()
     InvalidateRect(channelRackButton_, nullptr, TRUE);
     InvalidateRect(pianoRollButton_, nullptr, TRUE);
     InvalidateRect(mixerButton_, nullptr, TRUE);
+    InvalidateRect(playlistToolPrevButton_, nullptr, TRUE);
+    InvalidateRect(playlistToolNextButton_, nullptr, TRUE);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -1899,7 +2089,7 @@ void UI::updateWorkspacePanels()
         hintsLabel_,
         "Shortcuts: Alt+F8 Browser | F5 Arrange | F6 Channel Rack window | F7 Piano Roll | F9 Mixer window | Space Play | +/- Zoom");
 
-    setStaticText(browserHeaderLabel_, "Browser | " + currentBrowserTabLabel());
+    setStaticText(browserHeaderLabel_, "Project");
     setStaticText(channelHeaderLabel_, "Channel Rack | Target " + (visibleState_.selection.selectedTrackName.empty() ? std::string("<none>") : visibleState_.selection.selectedTrackName));
     setStaticText(pianoHeaderLabel_, "Piano Roll | Zoom " + currentZoomLabel(true) + " | Tool " + currentToolLabel(true));
     setStaticText(playlistHeaderLabel_, "Playlist | Zoom " + currentZoomLabel(false) + " | Tool " + currentToolLabel(false));
@@ -1911,10 +2101,10 @@ void UI::updateWorkspacePanels()
 void UI::updateViewButtons()
 {
     SetWindowTextA(browserButton_, "Browser");
-    SetWindowTextA(channelRackButton_, "chan.\nrack");
-    SetWindowTextA(pianoRollButton_, "piano\nroll");
+    SetWindowTextA(channelRackButton_, "Chan rack");
+    SetWindowTextA(pianoRollButton_, "Piano roll");
     SetWindowTextA(playlistButton_, "Playlist");
-    SetWindowTextA(mixerButton_, "mixer");
+    SetWindowTextA(mixerButton_, "Mixer");
     SetWindowTextA(pluginButton_, "Plugin");
 
     InvalidateRect(browserButton_, nullptr, TRUE);
@@ -1999,6 +2189,21 @@ void UI::toggleChronometer()
     workspace_.chronometerEnabled = !workspace_.chronometerEnabled;
 }
 
+void UI::selectPatternByNumber(int patternNumber)
+{
+    if (patternNumber <= 0)
+    {
+        return;
+    }
+
+    workspace_.activePattern = patternNumber;
+    syncWorkspaceModel();
+    updateTransportControls();
+    updateWorkspacePanels();
+    updateWindowTitle();
+    invalidateAllSurfaces();
+}
+
 void UI::syncTransportLoopState()
 {
     const int sampleRate = visibleState_.sampleRate > 0 ? visibleState_.sampleRate : 48000;
@@ -2034,6 +2239,31 @@ void UI::syncTransportLoopState()
         seekCommand.uintValue = visibleState_.transportSamplePosition % loopEndSample;
         engine_.postCommand(seekCommand);
     }
+}
+
+double UI::displayedTimelineSeconds() const
+{
+    double playbackSeconds = std::max(0.0, displayedTimelineAnchorSeconds_);
+    if (visibleState_.transportState == AudioEngine::TransportState::Playing)
+    {
+        playbackSeconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - displayedTimelineAnchorClock_).count();
+    }
+
+    if (!workspace_.songMode)
+    {
+        const double spanSeconds = getPatternPlaybackLengthSeconds();
+        if (spanSeconds > 0.0)
+        {
+            playbackSeconds = std::fmod(playbackSeconds, spanSeconds);
+            if (playbackSeconds < 0.0)
+            {
+                playbackSeconds += spanSeconds;
+            }
+        }
+    }
+
+    return playbackSeconds;
 }
 
 double UI::getPatternPlaybackLengthSeconds() const
@@ -2083,16 +2313,7 @@ double UI::getPlaybackProgressNormalized() const
         return 0.0;
     }
 
-    double playbackSeconds = std::max(0.0, visibleState_.timelineSeconds);
-    if (!workspace_.songMode)
-    {
-        playbackSeconds = std::fmod(playbackSeconds, spanSeconds);
-        if (playbackSeconds < 0.0)
-        {
-            playbackSeconds += spanSeconds;
-        }
-    }
-
+    const double playbackSeconds = displayedTimelineSeconds();
     return std::clamp(playbackSeconds / spanSeconds, 0.0, 1.0);
 }
 
@@ -2331,6 +2552,29 @@ void UI::requestAddBus()
     engine_.postCommand(command);
 }
 
+void UI::requestAddPattern()
+{
+    AudioEngine::EngineCommand command{};
+    command.type = AudioEngine::CommandType::AddPattern;
+    engine_.postCommand(command);
+}
+
+void UI::requestDuplicatePattern()
+{
+    AudioEngine::EngineCommand command{};
+    command.type = AudioEngine::CommandType::ClonePattern;
+    command.uintValue = static_cast<std::uint64_t>(std::max(1, workspace_.activePattern));
+    engine_.postCommand(command);
+}
+
+void UI::requestDeletePattern()
+{
+    AudioEngine::EngineCommand command{};
+    command.type = AudioEngine::CommandType::DeletePattern;
+    command.uintValue = static_cast<std::uint64_t>(std::max(1, workspace_.activePattern));
+    engine_.postCommand(command);
+}
+
 void UI::requestAddClip()
 {
     if (visibleState_.selection.selectedTrackId == 0)
@@ -2367,17 +2611,33 @@ void UI::requestRedo()
 
 void UI::requestSaveProject()
 {
+    std::string targetPath = visibleState_.document.sessionPath;
+    if (targetPath.empty())
+    {
+        targetPath = chooseProjectFilePath(hwnd_, true, "session.dawproject");
+        if (targetPath.empty())
+        {
+            return;
+        }
+    }
+
     AudioEngine::EngineCommand command{};
     command.type = AudioEngine::CommandType::SaveProject;
-    command.textValue = visibleState_.document.sessionPath.empty() ? "session.dawproject" : visibleState_.document.sessionPath;
+    command.textValue = std::move(targetPath);
     engine_.postCommand(command);
 }
 
 void UI::requestLoadProject()
 {
+    const std::string targetPath = chooseProjectFilePath(hwnd_, false, visibleState_.document.sessionPath);
+    if (targetPath.empty())
+    {
+        return;
+    }
+
     AudioEngine::EngineCommand command{};
     command.type = AudioEngine::CommandType::LoadProject;
-    command.textValue = visibleState_.document.sessionPath.empty() ? "session.dawproject" : visibleState_.document.sessionPath;
+    command.textValue = targetPath;
     engine_.postCommand(command);
 }
 
@@ -2472,8 +2732,64 @@ void UI::showMainMenuPopup(WORD commandId)
         nullptr);
 }
 
+void UI::showPatternSelectorPopup()
+{
+    if (patternPrevButton_ == nullptr)
+    {
+        return;
+    }
+
+    HMENU popupMenu = CreatePopupMenu();
+    if (popupMenu == nullptr)
+    {
+        return;
+    }
+
+    for (const auto& pattern : workspaceModel_.patterns)
+    {
+        UINT flags = MF_STRING;
+        if (pattern.patternNumber == workspace_.activePattern)
+        {
+            flags |= MF_CHECKED;
+        }
+        AppendMenuA(
+            popupMenu,
+            flags,
+            static_cast<UINT_PTR>(kPatternPopupSelectBase + pattern.patternNumber),
+            pattern.name.c_str());
+    }
+
+    AppendMenuA(popupMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(popupMenu, MF_STRING, IdMenuPatternsAdd, "Add Pattern");
+    AppendMenuA(popupMenu, MF_STRING, IdMenuPatternsClone, "Clone");
+    AppendMenuA(
+        popupMenu,
+        MF_STRING | (workspaceModel_.patterns.size() > 1 ? 0 : MF_GRAYED),
+        IdMenuPatternsDelete,
+        "Delete");
+
+    RECT anchorRect{};
+    GetWindowRect(patternPrevButton_, &anchorRect);
+    SetForegroundWindow(hwnd_);
+    TrackPopupMenu(
+        popupMenu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON,
+        anchorRect.left,
+        anchorRect.bottom,
+        0,
+        hwnd_,
+        nullptr);
+    DestroyMenu(popupMenu);
+}
+
 void UI::handleCommand(WORD commandId)
 {
+    if (commandId >= kPatternPopupSelectBase && commandId <= kPatternPopupSelectLimit)
+    {
+        selectPatternByNumber(static_cast<int>(commandId - kPatternPopupSelectBase));
+        return;
+    }
+
     switch (commandId)
     {
     case IdButtonMenuFile:
@@ -2514,6 +2830,13 @@ void UI::handleCommand(WORD commandId)
         break;
 
     case IdButtonPatSong:
+        workspace_.songMode = false;
+        break;
+
+    case IdButtonSongMode:
+        workspace_.songMode = true;
+        break;
+
     case IdMenuOptionsPatSong:
         workspace_.songMode = !workspace_.songMode;
         break;
@@ -2527,13 +2850,28 @@ void UI::handleCommand(WORD commandId)
         break;
 
     case IdButtonPatternPrev:
+        showPatternSelectorPopup();
+        break;
+
     case IdMenuPatternsPrev:
         selectPreviousPattern();
         break;
 
     case IdButtonPatternNext:
+    case IdMenuPatternsAdd:
+        requestAddPattern();
+        break;
+
     case IdMenuPatternsNext:
         selectNextPattern();
+        break;
+
+    case IdMenuPatternsClone:
+        requestDuplicatePattern();
+        break;
+
+    case IdMenuPatternsDelete:
+        requestDeletePattern();
         break;
 
     case IdButtonSnapPrev:
@@ -2601,11 +2939,11 @@ void UI::handleCommand(WORD commandId)
         break;
 
     case IdButtonPlaylistToolPrev:
-        cycleEditorTool(false, -1);
+        workspace_.playlistTool = EditorTool::Draw;
         break;
 
     case IdButtonPlaylistToolNext:
-        cycleEditorTool(false, 1);
+        workspace_.playlistTool = EditorTool::Slice;
         break;
 
     case IdButtonMixer:
@@ -2715,4 +3053,3 @@ void UI::handleCommand(WORD commandId)
     layoutControls();
     refreshFromEngineSnapshot();
 }
-
