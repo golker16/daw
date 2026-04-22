@@ -1,3 +1,8 @@
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <iterator>
+
 void UI::rebuildPlaylistVisuals(const RECT& rect)
 {
     interactionState_.playlistClipVisuals.clear();
@@ -50,7 +55,7 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
 void UI::rebuildPianoVisuals(const RECT& rect)
 {
     interactionState_.pianoNoteVisuals.clear();
-    const int keyWidth = 48;
+    const int keyWidth = 72;
     const int laneHeight = 22;
     const int usableWidth = std::max<int>(1, static_cast<int>(rect.right) - keyWidth);
     const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
@@ -310,30 +315,57 @@ void UI::rebuildBrowserEntries()
 
 void UI::ensurePatternBank()
 {
-    const std::size_t expectedLaneCount = std::max<std::size_t>(1, visibleState_.project.tracks.empty() ? 1 : visibleState_.project.tracks.size());
-    bool rebuildPatterns = workspaceModel_.patterns.empty();
-
-    if (!rebuildPatterns)
-    {
-        for (const auto& pattern : workspaceModel_.patterns)
-        {
-            if (pattern.lanes.size() != expectedLaneCount)
-            {
-                rebuildPatterns = true;
-                break;
-            }
-        }
-    }
-
-    if (!rebuildPatterns)
-    {
-        return;
-    }
-
     workspaceModel_.patterns.clear();
-    for (int patternNumber = 1; patternNumber <= 4; ++patternNumber)
+    for (const auto& sourcePattern : visibleState_.project.patterns)
     {
-        workspaceModel_.patterns.push_back(makePatternState(patternNumber));
+        PatternState pattern{};
+        pattern.patternNumber = sourcePattern.patternNumber;
+        pattern.name = sourcePattern.name;
+        pattern.lengthInBars = sourcePattern.lengthInBars;
+        pattern.accentAmount = sourcePattern.accentAmount;
+
+        for (const auto& sourceLane : sourcePattern.lanes)
+        {
+            PatternLaneState lane{};
+            lane.trackId = sourceLane.trackId;
+            lane.steps.reserve(sourceLane.steps.size());
+            for (const auto& step : sourceLane.steps)
+            {
+                lane.steps.push_back(ChannelStepState{step.enabled, step.velocity});
+            }
+
+            for (const auto& note : sourceLane.notes)
+            {
+                lane.notes.push_back(PianoNoteState{
+                    note.lane,
+                    note.step,
+                    note.length,
+                    note.velocity,
+                    note.accent,
+                    note.slide,
+                    note.selected});
+            }
+
+            lane.swing = sourceLane.swing;
+            lane.shuffle = sourceLane.shuffle;
+
+            const auto trackIt = std::find_if(
+                visibleState_.project.tracks.begin(),
+                visibleState_.project.tracks.end(),
+                [&](const VisibleTrack& track) { return track.trackId == sourceLane.trackId; });
+            lane.name = trackIt == visibleState_.project.tracks.end()
+                ? ("Channel " + std::to_string(sourceLane.trackId))
+                : trackIt->name;
+
+            pattern.lanes.push_back(std::move(lane));
+        }
+
+        workspaceModel_.patterns.push_back(std::move(pattern));
+    }
+
+    if (workspaceModel_.patterns.empty())
+    {
+        workspaceModel_.patterns.push_back(makePatternState(1));
     }
 }
 
@@ -357,40 +389,43 @@ void UI::rebuildPlaylistBlocks()
     workspaceModel_.playlistBlocks.clear();
     workspaceModel_.markers.clear();
 
-    int lane = 0;
-    for (const auto& track : visibleState_.project.tracks)
+    for (const auto& item : visibleState_.project.playlistItems)
     {
-        for (const auto& clip : track.clips)
+        if (item.type == AudioEngine::PlaylistItemType::AutomationClip)
         {
-            PlaylistBlockState block{};
-            block.clipId = clip.clipId;
-            block.trackId = track.trackId;
-            block.lane = lane;
-            block.startCell = clampValue(static_cast<int>(clip.startTimeSeconds * 2.0), 0, kPlaylistCellCount - 2);
-            block.lengthCells = std::max(2, static_cast<int>(clip.durationSeconds * 2.0 + 0.5));
-            block.label = clip.name.empty() ? ("Clip " + std::to_string(clip.clipId)) : clip.name;
-            block.clipType = clip.sourceLabel;
-            block.patternNumber = workspace_.activePattern;
-            block.muted = clip.muted;
-            block.selected = (clip.clipId == interactionState_.selectedClipId);
-            workspaceModel_.playlistBlocks.push_back(std::move(block));
+            continue;
         }
-        ++lane;
+
+        auto trackIt = std::find_if(
+            visibleState_.project.tracks.begin(),
+            visibleState_.project.tracks.end(),
+            [&](const VisibleTrack& track) { return track.trackId == item.trackId; });
+        if (trackIt == visibleState_.project.tracks.end())
+        {
+            continue;
+        }
+
+        PlaylistBlockState block{};
+        block.clipId = item.itemId;
+        block.trackId = item.trackId;
+        block.lane = static_cast<int>(std::distance(visibleState_.project.tracks.begin(), trackIt));
+        block.startCell = clampValue(static_cast<int>(item.startTimeSeconds * 2.0 + 0.5), 0, kPlaylistCellCount - 2);
+        block.lengthCells = std::max(2, static_cast<int>(item.durationSeconds * 2.0 + 0.5));
+        block.label = item.label.empty() ? ("Clip " + std::to_string(item.itemId)) : item.label;
+        block.clipType = item.type == AudioEngine::PlaylistItemType::AudioClip ? "Audio" : "Pattern";
+        block.patternNumber = item.patternNumber;
+        block.muted = item.muted;
+        block.selected = (item.itemId == interactionState_.selectedClipId);
+        workspaceModel_.playlistBlocks.push_back(std::move(block));
     }
 
-    if (workspaceModel_.playlistBlocks.empty())
+    for (const auto& marker : visibleState_.project.markers)
     {
-        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{1, 0, 0, 0, 4, "Pattern 1 Intro", "Pattern", 1, false, false});
-        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{2, 0, 1, 4, 6, "Pattern 2 Bass", "Pattern", 2, false, false});
-        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{3, 0, 2, 10, 8, "Vocal Chop", "Audio", 0, false, false});
-        workspaceModel_.playlistBlocks.push_back(PlaylistBlockState{4, 0, 0, 18, 6, "Pattern 3 Fill", "Pattern", 3, false, false});
+        workspaceModel_.markers.push_back(
+            PlaylistMarkerState{
+                marker.name,
+                clampValue(static_cast<int>(marker.timeSeconds * 2.0 + 0.5), 0, kPlaylistCellCount - 1)});
     }
-
-    workspaceModel_.markers = {
-        {"Intro", 0},
-        {"Drop", 8},
-        {"Break", 16},
-        {"Outro", 24}};
 }
 
 void UI::rebuildMixerStrips()
@@ -404,11 +439,13 @@ void UI::rebuildMixerStrips()
         strip.busId = bus.busId;
         strip.name = bus.name;
         strip.insertSlot = insertSlot;
-        strip.volumeDb = -4.5 + static_cast<double>(insertSlot % 5);
-        strip.pan = (insertSlot % 3 == 0) ? -0.12 : ((insertSlot % 4 == 0) ? 0.15 : 0.0);
+        strip.volumeDb = 20.0 * std::log10(std::max(0.0001, bus.gain));
+        strip.pan = bus.pan;
         strip.peakLevel = normalizedMeterFill(strip.volumeDb);
-        strip.routeTarget = (insertSlot % 3 == 0) ? 0 : -1;
-        strip.sendAmount = 0.12 * static_cast<double>(insertSlot % 4);
+        strip.solo = bus.solo;
+        strip.muted = bus.muted;
+        strip.routeTarget = bus.outputBusId == 0 ? -1 : static_cast<int>(bus.outputBusId);
+        strip.sendAmount = 0.0;
         strip.effects = {"EQ", "Comp", insertSlot % 2 == 0 ? "Saturator" : "Delay"};
         workspaceModel_.mixerStrips.push_back(std::move(strip));
         ++insertSlot;
@@ -420,40 +457,66 @@ void UI::rebuildMixerStrips()
         workspaceModel_.mixerStrips.push_back(MixerStripState{2, "Music Bus", 2, -4.5, -0.08, 66, false, false, 0, 0.26, {"EQ", "Compressor", "Stereo"}});
     }
 
-    workspaceModel_.mixerStrips.push_back(MixerStripState{0, "Master", 0, -1.2, 0.0, 92, false, false, -1, 0.0, {"Glue", "Limiter"}});
+    const double masterGain =
+        visibleState_.project.buses.empty()
+            ? 0.87
+            : visibleState_.project.buses.front().gain;
+    const double masterPan =
+        visibleState_.project.buses.empty()
+            ? 0.0
+            : visibleState_.project.buses.front().pan;
+    const bool masterSolo =
+        !visibleState_.project.buses.empty() && visibleState_.project.buses.front().solo;
+    const bool masterMuted =
+        !visibleState_.project.buses.empty() && visibleState_.project.buses.front().muted;
+    workspaceModel_.mixerStrips.push_back(MixerStripState{
+        0,
+        "Master",
+        0,
+        20.0 * std::log10(std::max(0.0001, masterGain)),
+        masterPan,
+        normalizedMeterFill(20.0 * std::log10(std::max(0.0001, masterGain))),
+        masterSolo,
+        masterMuted,
+        -1,
+        0.0,
+        {"Glue", "Limiter"}});
 }
 
 void UI::rebuildChannelSettings()
 {
     workspaceModel_.channelSettings.clear();
-
-    std::size_t laneIndex = 0;
-    for (const auto& lane : workspaceModel_.patternLanes)
+    for (const auto& sourceSettings : visibleState_.project.channelSettings)
     {
         ChannelSettingsState settings{};
-        settings.trackId = lane.trackId;
-        settings.name = lane.name;
-        settings.gain = 0.72 + (static_cast<double>(laneIndex % 4) * 0.08);
-        settings.pan = (laneIndex % 3 == 0) ? -0.12 : ((laneIndex % 4 == 0) ? 0.16 : 0.0);
-        settings.pitchSemitones = static_cast<double>((static_cast<int>(laneIndex) % 5) - 2);
-        settings.attackMs = 8.0 + static_cast<double>(laneIndex * 3);
-        settings.releaseMs = 150.0 + static_cast<double>(laneIndex * 24);
-        settings.filterCutoffHz = 6200.0 + static_cast<double>(laneIndex * 850);
-        settings.resonance = 0.18 + static_cast<double>(laneIndex) * 0.03;
-        settings.mixerInsert = static_cast<int>(laneIndex + 1);
-        settings.routeTarget = (laneIndex % 2 == 0) ? 0 : -1;
-        settings.reverse = (laneIndex % 5 == 0);
-        settings.timeStretch = true;
-        settings.pluginRack = {
-            laneIndex % 2 == 0 ? "Sampler" : "Synth Rack",
-            "Parametric EQ",
-            laneIndex % 3 == 0 ? "Soft Clipper" : "Compressor"};
-        settings.presets = {
-            lane.name + " Init",
-            lane.name + " Bright",
-            lane.name + " Wide"};
+        settings.trackId = sourceSettings.trackId;
+        settings.name = sourceSettings.name;
+        settings.gain = sourceSettings.gain;
+        settings.pan = sourceSettings.pan;
+        settings.pitchSemitones = sourceSettings.pitchSemitones;
+        settings.attackMs = sourceSettings.attackMs;
+        settings.releaseMs = sourceSettings.releaseMs;
+        settings.filterCutoffHz = sourceSettings.filterCutoffHz;
+        settings.resonance = sourceSettings.resonance;
+        settings.mixerInsert = sourceSettings.mixerInsert;
+        settings.routeTarget = sourceSettings.routeTarget;
+        settings.reverse = sourceSettings.reverse;
+        settings.timeStretch = sourceSettings.timeStretch;
+        settings.pluginRack = sourceSettings.pluginRack;
+        if (sourceSettings.generatorType == AudioEngine::GeneratorType::Sampler)
+        {
+            settings.pluginRack.insert(settings.pluginRack.begin(), "Sampler");
+        }
+        else if (sourceSettings.generatorType == AudioEngine::GeneratorType::TestSynth)
+        {
+            settings.pluginRack.insert(settings.pluginRack.begin(), "TestSynth");
+        }
+        else
+        {
+            settings.pluginRack.insert(settings.pluginRack.begin(), "PluginInst");
+        }
+        settings.presets = sourceSettings.presets;
         workspaceModel_.channelSettings.push_back(std::move(settings));
-        ++laneIndex;
     }
 
     if (workspaceModel_.channelSettings.empty())
@@ -466,9 +529,22 @@ void UI::rebuildAutomationLanes()
 {
     workspaceModel_.automationLanes.clear();
     const int automationLaneBase = static_cast<int>(workspaceModel_.patternLanes.size());
-    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Master Volume", {85, 78, 80, 92, 88, 74, 96, 83}, 4001, automationLaneBase + 0, 0, 8, false});
-    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Lead Filter", {24, 28, 36, 48, 58, 72, 81, 94}, 4002, automationLaneBase + 1, 8, 8, false});
-    workspaceModel_.automationLanes.push_back(AutomationLaneState{"Delay Send", {8, 12, 18, 12, 22, 14, 26, 18}, 4003, automationLaneBase + 2, 18, 6, false});
+    int automationIndex = 0;
+    for (const auto& sourceAutomation : visibleState_.project.automationClips)
+    {
+        AutomationLaneState automation{};
+        automation.target = sourceAutomation.target;
+        automation.clipId = sourceAutomation.clipId;
+        automation.lane = automationLaneBase + automationIndex;
+        automation.startCell = sourceAutomation.startCell;
+        automation.lengthCells = sourceAutomation.lengthCells;
+        for (const auto& point : sourceAutomation.points)
+        {
+            automation.values.push_back(point.value);
+        }
+        workspaceModel_.automationLanes.push_back(std::move(automation));
+        ++automationIndex;
+    }
 }
 
 UI::PatternState UI::makePatternState(int patternNumber) const
@@ -1216,4 +1292,5 @@ std::string UI::browserDropTargetLabel() const
     const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
     return entry.label + " -> Rack / Playlist / Mixer";
 }
+
 
