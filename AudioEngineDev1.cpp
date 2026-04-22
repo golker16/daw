@@ -2079,3 +2079,11 @@ bool AudioEngine::moveClip(
     publishSnapshot();
     return true;
 }
+
+/*
+ * AudioEngineDev1.cpp sigue siendo la puerta de entrada historica del motor.
+ * Encadena las demas partes para que el build siga funcionando aunque el index
+ * solo incluya este archivo.
+ */
+#include "AudioEngineDev2.cpp"
+#include "AudioEngineDev3.cpp"
