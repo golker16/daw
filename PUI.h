@@ -40,8 +40,15 @@ public:
         std::uint32_t clipId = 0;
         std::string name;
         std::string sourceLabel;
+        int patternNumber = 0;
         double startTimeSeconds = 0.0;
         double durationSeconds = 0.0;
+        double trimStartSeconds = 0.0;
+        double trimEndSeconds = 0.0;
+        double fadeInSeconds = 0.0;
+        double fadeOutSeconds = 0.0;
+        double gain = 1.0;
+        double pan = 0.0;
         bool muted = false;
     };
 
@@ -53,6 +60,8 @@ public:
         bool armed = false;
         bool muted = false;
         bool solo = false;
+        double gain = 1.0;
+        double pan = 0.0;
         std::vector<VisibleClip> clips;
     };
 
@@ -60,6 +69,10 @@ public:
     {
         std::uint32_t busId = 0;
         std::string name;
+        double gain = 1.0;
+        double pan = 0.0;
+        bool muted = false;
+        bool solo = false;
         std::vector<std::uint32_t> inputTrackIds;
     };
 
@@ -73,6 +86,11 @@ public:
         std::uint32_t redoDepth = 0;
         std::vector<VisibleTrack> tracks;
         std::vector<VisibleBus> buses;
+        std::vector<AudioEngine::PlaylistItemState> playlistItems;
+        std::vector<AudioEngine::MarkerState> markers;
+        std::vector<AudioEngine::PatternState> patterns;
+        std::vector<AudioEngine::ChannelSettingsState> channelSettings;
+        std::vector<AudioEngine::AutomationClipState> automationClips;
     };
 
     struct SelectionState
@@ -809,7 +827,6 @@ private:
     std::uint64_t syncedLoopStartSample_ = 0;
     std::uint64_t syncedLoopEndSample_ = 0;
 };
-
 
 
 
