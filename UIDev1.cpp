@@ -1700,6 +1700,7 @@ UI::VisibleEngineState UI::buildVisibleEngineState() const
         visibleBus.pan = bus.pan;
         visibleBus.muted = bus.muted;
         visibleBus.solo = bus.solo;
+        visibleBus.outputBusId = bus.outputBusId;
         visibleBus.inputTrackIds = bus.inputTrackIds;
         snapshot.project.buses.push_back(std::move(visibleBus));
     }
