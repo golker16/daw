@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <sstream>
 #include <thread>
@@ -49,6 +50,11 @@ namespace
     constexpr DWORD kBackendWaitTimeoutMs = 2000;
     constexpr DWORD kMaintenanceTickMs = 250;
     constexpr std::uint32_t kSandboxWatchdogThreshold = 6;
+    constexpr int kDefaultStepCount = 16;
+    constexpr int kDefaultPatternCount = 4;
+    constexpr int kDefaultPlaylistCellCount = 32;
+    constexpr int kDefaultPianoLaneCount = 24;
+    constexpr double kPlaylistCellSeconds = 0.5;
 
     struct SandboxSharedState
     {
@@ -132,6 +138,37 @@ namespace
         return parts;
     }
 
+    std::string joinString(const std::vector<std::string>& values, char delimiter)
+    {
+        std::ostringstream stream;
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+            if (index > 0)
+            {
+                stream << delimiter;
+            }
+            stream << values[index];
+        }
+        return stream.str();
+    }
+
+    bool parseBoolToken(const std::string& text)
+    {
+        return text == "1" || toLowerCopy(text) == "true" || toLowerCopy(text) == "yes";
+    }
+
+    bool hasFileExtension(const std::string& path, const std::string& extension)
+    {
+        return toLowerCopy(std::filesystem::path(path).extension().string()) == toLowerCopy(extension);
+    }
+
+    std::string fileStemFromPath(const std::string& path, const std::string& fallback)
+    {
+        const std::filesystem::path filePath(path);
+        const std::string stem = filePath.stem().string();
+        return stem.empty() ? fallback : stem;
+    }
+
     double clampSample(double value)
     {
         return std::clamp(value, -1.0, 1.0);
@@ -141,6 +178,122 @@ namespace
     {
         const double clamped = std::clamp(bpm, 10.0, 522.0);
         return std::round(clamped * 1000.0) / 1000.0;
+    }
+
+    int extractPatternNumberFromClipName(const std::string& clipName)
+    {
+        for (std::size_t index = 0; index < clipName.size(); ++index)
+        {
+            if (std::isdigit(static_cast<unsigned char>(clipName[index])) != 0)
+            {
+                return std::max(1, std::atoi(clipName.substr(index).c_str()));
+            }
+        }
+        return 1;
+    }
+
+    double midiNoteToFrequency(int midiNote)
+    {
+        return 440.0 * std::pow(2.0, (static_cast<double>(midiNote) - 69.0) / 12.0);
+    }
+
+    double linearSampleAt(const std::vector<double>& samples, double index)
+    {
+        if (samples.empty())
+        {
+            return 0.0;
+        }
+
+        const double clampedIndex = std::clamp(index, 0.0, static_cast<double>(samples.size() - 1));
+        const std::size_t leftIndex = static_cast<std::size_t>(clampedIndex);
+        const std::size_t rightIndex = std::min(leftIndex + 1, samples.size() - 1);
+        const double blend = clampedIndex - static_cast<double>(leftIndex);
+        return samples[leftIndex] + ((samples[rightIndex] - samples[leftIndex]) * blend);
+    }
+
+    double computeEnvelopeGain(
+        double elapsedSeconds,
+        double noteBodyDurationSeconds,
+        const AudioEngine::ChannelSettingsState& settings)
+    {
+        const double safeElapsed = std::max(0.0, elapsedSeconds);
+        const double attackSeconds = std::max(0.0, settings.attackMs / 1000.0);
+        const double decaySeconds = std::max(0.0, settings.decayMs / 1000.0);
+        const double releaseSeconds = std::max(0.0, settings.releaseMs / 1000.0);
+        const double sustainLevel = std::clamp(settings.sustainLevel, 0.0, 1.0);
+
+        if (attackSeconds > 0.0 && safeElapsed < attackSeconds)
+        {
+            return safeElapsed / attackSeconds;
+        }
+
+        const double decayStart = attackSeconds;
+        const double decayEnd = decayStart + decaySeconds;
+        if (decaySeconds > 0.0 && safeElapsed < decayEnd)
+        {
+            const double decayT = (safeElapsed - decayStart) / decaySeconds;
+            return 1.0 + ((sustainLevel - 1.0) * decayT);
+        }
+
+        if (safeElapsed <= noteBodyDurationSeconds)
+        {
+            return sustainLevel;
+        }
+
+        if (releaseSeconds <= 0.0)
+        {
+            return 0.0;
+        }
+
+        const double releaseT = (safeElapsed - noteBodyDurationSeconds) / releaseSeconds;
+        if (releaseT >= 1.0)
+        {
+            return 0.0;
+        }
+
+        return sustainLevel * (1.0 - releaseT);
+    }
+
+    double computeFadeGain(
+        double localTimeSeconds,
+        double totalDurationSeconds,
+        double fadeInSeconds,
+        double fadeOutSeconds)
+    {
+        double gain = 1.0;
+
+        if (fadeInSeconds > 0.0)
+        {
+            gain *= std::clamp(localTimeSeconds / fadeInSeconds, 0.0, 1.0);
+        }
+
+        if (fadeOutSeconds > 0.0)
+        {
+            const double tailSeconds = std::max(0.0, totalDurationSeconds - localTimeSeconds);
+            gain *= std::clamp(tailSeconds / fadeOutSeconds, 0.0, 1.0);
+        }
+
+        return gain;
+    }
+
+    std::pair<double, double> stereoPanGains(double pan)
+    {
+        const double clampedPan = std::clamp(pan, -1.0, 1.0);
+        const double angle = (clampedPan + 1.0) * (kTwoPi / 8.0);
+        return {std::cos(angle), std::sin(angle)};
+    }
+
+    std::string makeAutosavePathForSession(const std::string& sessionPath)
+    {
+        std::filesystem::path path(sessionPath.empty() ? "session.dawproject" : sessionPath);
+        if (!path.has_extension())
+        {
+            path += ".dawproject";
+        }
+
+        const std::string stem = path.stem().string();
+        path.replace_filename(stem + ".autosave" + path.extension().string());
+        return path.string();
     }
 
     const char* toString(AudioEngine::EngineState state)
@@ -198,6 +351,11 @@ namespace
     std::uint32_t pluginNodeId(std::uint32_t trackId)
     {
         return kPluginNodeBase + (trackId * 10);
+    }
+
+    std::uint32_t sendNodeId(std::uint32_t trackId)
+    {
+        return kPluginNodeBase + (trackId * 10) + 4;
     }
 
     std::uint32_t busNodeId(std::uint32_t busId)
@@ -333,6 +491,36 @@ namespace
         }
 
         return true;
+    }
+
+    std::shared_ptr<const DecodedWavData> getSamplerSourceData(const std::string& path)
+    {
+        static std::mutex cacheMutex;
+        static std::unordered_map<std::string, std::shared_ptr<DecodedWavData>> cache;
+
+        if (path.empty())
+        {
+            return nullptr;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex);
+            const auto it = cache.find(path);
+            if (it != cache.end())
+            {
+                return it->second;
+            }
+        }
+
+        auto decoded = std::make_shared<DecodedWavData>();
+        if (!decodeWavFile(path, *decoded))
+        {
+            return nullptr;
+        }
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        cache[path] = decoded;
+        return decoded;
     }
 }
 
@@ -549,6 +737,30 @@ bool AudioEngine::start()
         return true;
     }
 
+    audioThreadState_.helpersRunning.store(false);
+    diskWorkerRunning_.store(false);
+    anticipativeCv_.notify_all();
+    diskQueueCv_.notify_all();
+
+    if (audioThread_.joinable() && !audioThreadState_.running.load())
+    {
+        audioThread_.join();
+    }
+
+    for (auto& thread : helperThreads_)
+    {
+        if (thread.joinable())
+        {
+            thread.join();
+        }
+    }
+    helperThreads_.clear();
+
+    if (diskThread_.joinable())
+    {
+        diskThread_.join();
+    }
+
     state_.store(EngineState::Starting);
     updateStatusFromState();
     publishSnapshot();
@@ -612,8 +824,12 @@ bool AudioEngine::stop()
         return false;
     }
 
+    const bool calledFromAudioThread =
+        audioThread_.joinable() && std::this_thread::get_id() == audioThread_.get_id();
+
     state_.store(EngineState::Stopping);
     updateStatusFromState();
+    transportInfo_.state = TransportState::Stopped;
 
     running_.store(false);
     audioThreadState_.stopRequested.store(true);
@@ -621,6 +837,13 @@ bool AudioEngine::stop()
     diskWorkerRunning_.store(false);
     anticipativeCv_.notify_all();
     diskQueueCv_.notify_all();
+
+    publishSnapshot();
+
+    if (calledFromAudioThread)
+    {
+        return true;
+    }
 
     if (audioThread_.joinable())
     {
@@ -1373,6 +1596,16 @@ bool AudioEngine::renderOffline(const OfflineRenderRequest& request)
 
     lastOfflineRenderRequest_ = request;
 
+    const ProjectState originalProjectState = projectState_;
+    const bool isolateTrack = request.targetTrackId != 0;
+    if (isolateTrack)
+    {
+        for (auto& track : projectState_.tracks)
+        {
+            track.muted = track.trackId != request.targetTrackId;
+        }
+    }
+
     const std::uint64_t startSample = static_cast<std::uint64_t>(
         request.startTimeSeconds * static_cast<double>(request.sampleRate));
     const std::uint64_t endSample = static_cast<std::uint64_t>(
@@ -1435,8 +1668,17 @@ bool AudioEngine::renderOffline(const OfflineRenderRequest& request)
 
     if (!writeWavFile(request.outputPath, request.sampleRate, aggregateBuffer))
     {
+        if (isolateTrack)
+        {
+            projectState_ = originalProjectState;
+        }
         setError(kErrorOfflineRender, "Failed to write offline render to disk.");
         return false;
+    }
+
+    if (isolateTrack)
+    {
+        projectState_ = originalProjectState;
     }
 
     publishSnapshot();
@@ -1451,7 +1693,31 @@ bool AudioEngine::freezeTrack(std::uint32_t trackNodeId)
     request.sampleRate = deviceState_.sampleRate;
     request.outputPath = "freeze_track_" + std::to_string(trackNodeId) + ".wav";
     request.highQuality = true;
+    request.targetTrackId =
+        trackNodeId >= kTrackNodeBase
+            ? static_cast<std::uint32_t>((trackNodeId - kTrackNodeBase) / 10)
+            : trackNodeId;
     return renderOffline(request);
+}
+
+bool AudioEngine::addPattern(const std::string& name)
+{
+    const ProjectState beforeState = projectState_;
+
+    int nextPatternNumber = 1;
+    for (const auto& pattern : projectState_.patterns)
+    {
+        nextPatternNumber = std::max(nextPatternNumber, pattern.patternNumber + 1);
+    }
+
+    PatternState pattern = makeDefaultPatternState(nextPatternNumber);
+    pattern.name = name.empty() ? ("Pattern " + std::to_string(nextPatternNumber)) : name;
+    projectState_.patterns.push_back(std::move(pattern));
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Add pattern", beforeState);
+    publishSnapshot();
+    return true;
 }
 
 bool AudioEngine::addTrack(const std::string& name)
@@ -1462,12 +1728,17 @@ bool AudioEngine::addTrack(const std::string& name)
     track.trackId = nextTrackId();
     track.busId = projectState_.buses.empty() ? nextBusId() : projectState_.buses.front().busId;
     track.name = name.empty() ? ("Track " + std::to_string(track.trackId)) : name;
+    track.gain = 0.92;
+    track.pan = 0.0;
+    track.sendAmount = 0.0;
 
     if (projectState_.buses.empty())
     {
         BusState bus{};
         bus.busId = nextBusId();
         bus.name = "Main Bus";
+        bus.gain = 1.0;
+        bus.pan = 0.0;
         projectState_.buses.push_back(bus);
         track.busId = bus.busId;
     }
@@ -1484,6 +1755,7 @@ bool AudioEngine::addTrack(const std::string& name)
         busIt->inputTrackIds.push_back(track.trackId);
     }
 
+    synchronizeProjectMusicalState();
     projectState_.dirty = true;
     ++projectState_.revision;
     pushUndoState("Add track", beforeState);
@@ -1499,11 +1771,156 @@ bool AudioEngine::addBus(const std::string& name)
     BusState bus{};
     bus.busId = nextBusId();
     bus.name = name.empty() ? ("Bus " + std::to_string(bus.busId)) : name;
+    bus.gain = 1.0;
+    bus.pan = 0.0;
     projectState_.buses.push_back(bus);
     projectState_.dirty = true;
     ++projectState_.revision;
     pushUndoState("Add bus", beforeState);
     requestGraphRebuild();
+    publishSnapshot();
+    return true;
+}
+
+bool AudioEngine::togglePatternStep(int patternNumber, std::uint32_t trackId, int stepIndex)
+{
+    PatternState* pattern = findPatternState(patternNumber);
+    if (pattern == nullptr)
+    {
+        setError(kErrorProjectIo, "Pattern not found while toggling step.");
+        return false;
+    }
+
+    PatternLaneState* lane = findPatternLane(*pattern, trackId);
+    if (lane == nullptr)
+    {
+        setError(kErrorProjectIo, "Pattern lane not found while toggling step.");
+        return false;
+    }
+
+    if (stepIndex < 0 || stepIndex >= static_cast<int>(lane->steps.size()))
+    {
+        setError(kErrorProjectIo, "Step index out of range while toggling step.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+    StepState& step = lane->steps[static_cast<std::size_t>(stepIndex)];
+    step.enabled = !step.enabled;
+    step.velocity = step.enabled ? std::max(96, step.velocity) : 0;
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Toggle step", beforeState);
+    publishSnapshot();
+    return true;
+}
+
+bool AudioEngine::upsertMidiNote(
+    int patternNumber,
+    std::uint32_t trackId,
+    std::size_t noteIndex,
+    const MidiNoteState& note,
+    bool createIfMissing)
+{
+    PatternState* pattern = findPatternState(patternNumber);
+    if (pattern == nullptr)
+    {
+        setError(kErrorProjectIo, "Pattern not found while editing MIDI note.");
+        return false;
+    }
+
+    PatternLaneState* lane = findPatternLane(*pattern, trackId);
+    if (lane == nullptr)
+    {
+        setError(kErrorProjectIo, "Pattern lane not found while editing MIDI note.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+    const bool editingExisting = noteIndex < lane->notes.size();
+    MidiNoteState sanitizedNote = note;
+    sanitizedNote.lane = std::clamp(sanitizedNote.lane, 0, kDefaultPianoLaneCount - 1);
+    sanitizedNote.step = std::clamp(sanitizedNote.step, 0, kDefaultPlaylistCellCount - 1);
+    sanitizedNote.length = std::max(1, sanitizedNote.length);
+    sanitizedNote.velocity = std::clamp(sanitizedNote.velocity, 1, 127);
+
+    if (editingExisting)
+    {
+        lane->notes[noteIndex] = sanitizedNote;
+    }
+    else if (createIfMissing)
+    {
+        lane->notes.push_back(sanitizedNote);
+    }
+    else
+    {
+        setError(kErrorProjectIo, "MIDI note index out of range.");
+        return false;
+    }
+
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState(editingExisting ? "Edit MIDI note" : "Add MIDI note", beforeState);
+    publishSnapshot();
+    return true;
+}
+
+bool AudioEngine::setAutomationPoint(std::uint32_t clipId, int pointIndex, int cell, int value)
+{
+    AutomationClipState* automationClip = findAutomationClip(clipId);
+    if (automationClip == nullptr)
+    {
+        setError(kErrorProjectIo, "Automation clip not found while editing point.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+    AutomationPointState point{};
+    point.cell = std::max(0, cell);
+    point.value = std::clamp(value, 0, 100);
+
+    if (pointIndex < 0)
+    {
+        automationClip->points.push_back(point);
+    }
+    else if (pointIndex >= static_cast<int>(automationClip->points.size()))
+    {
+        automationClip->points.resize(static_cast<std::size_t>(pointIndex + 1));
+        automationClip->points[static_cast<std::size_t>(pointIndex)] = point;
+    }
+    else
+    {
+        automationClip->points[static_cast<std::size_t>(pointIndex)] = point;
+    }
+
+    std::sort(
+        automationClip->points.begin(),
+        automationClip->points.end(),
+        [](const AutomationPointState& left, const AutomationPointState& right)
+        {
+            return left.cell < right.cell;
+        });
+
+    if (!automationClip->points.empty())
+    {
+        automationClip->startCell = automationClip->points.front().cell;
+        automationClip->lengthCells =
+            std::max(2, automationClip->points.back().cell - automationClip->startCell + 1);
+    }
+
+    if (PlaylistItemState* playlistItem = findPlaylistItem(automationClip->clipId); playlistItem != nullptr)
+    {
+        playlistItem->trackId = automationClip->trackId;
+        playlistItem->startTimeSeconds =
+            static_cast<double>(std::max(0, automationClip->startCell)) * kPlaylistCellSeconds;
+        playlistItem->durationSeconds =
+            static_cast<double>(std::max(1, automationClip->lengthCells)) * kPlaylistCellSeconds;
+        playlistItem->label = automationClip->target;
+    }
+
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Edit automation point", beforeState);
     publishSnapshot();
     return true;
 }
@@ -1522,18 +1939,58 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     }
 
     const ProjectState beforeState = projectState_;
+    const bool audioClipRequest =
+        hasFileExtension(clipName, ".wav") ||
+        hasFileExtension(clipName, ".wave") ||
+        hasFileExtension(clipName, ".aif") ||
+        hasFileExtension(clipName, ".aiff");
+    const int patternNumber = audioClipRequest ? 0 : extractPatternNumberFromClipName(clipName);
+    const std::string label = clipName.empty()
+        ? (audioClipRequest ? ("Audio " + std::to_string(nextClipId())) : ("Pattern " + std::to_string(std::max(1, patternNumber))))
+        : clipName;
 
     ClipState clip{};
     clip.clipId = nextClipId();
     clip.trackId = trackId;
-    clip.name = clipName.empty() ? ("Clip " + std::to_string(clip.clipId)) : clipName;
-    clip.sourceType = ClipSourceType::GeneratedTone;
+    clip.name = audioClipRequest ? fileStemFromPath(label, "Audio " + std::to_string(clip.clipId)) : label;
+    clip.sourceType = audioClipRequest ? ClipSourceType::AudioFile : ClipSourceType::GeneratedTone;
+    clip.filePath = audioClipRequest ? clipName : "";
+    clip.patternNumber = patternNumber;
     clip.startTimeSeconds = 0.0;
     clip.durationSeconds = 4.0;
     clip.gain = 0.8;
+    clip.loopEnabled = !audioClipRequest;
+    clip.timeStretchEnabled = true;
 
-    trackIt->clipIds.push_back(clip.clipId);
+    if (audioClipRequest)
+    {
+        DecodedWavData wavData{};
+        if (decodeWavFile(clip.filePath, wavData) && wavData.sampleRate != 0)
+        {
+            clip.durationSeconds = static_cast<double>(wavData.left.size()) / static_cast<double>(wavData.sampleRate);
+        }
+    }
+
+    PlaylistItemState item{};
+    item.itemId = nextPlaylistItemId();
+    item.trackId = trackId;
+    item.type = audioClipRequest ? PlaylistItemType::AudioClip : PlaylistItemType::PatternClip;
+    item.sourceClipId = clip.clipId;
+    item.patternNumber = patternNumber;
+    item.label = audioClipRequest ? clip.name : ("Pattern " + std::to_string(std::max(1, patternNumber)));
+    item.startTimeSeconds = 0.0;
+    item.durationSeconds = std::max(2.0, clip.durationSeconds);
+    item.gain = clip.gain;
+    item.pan = clip.pan;
+    item.pitchSemitones = clip.pitchSemitones;
+    item.stretchRatio = clip.stretchRatio;
+    item.muted = clip.muted;
+    item.loopEnabled = clip.loopEnabled;
+    item.timeStretchEnabled = clip.timeStretchEnabled;
+
+    trackIt->clipIds.push_back(item.itemId);
     projectState_.clips.push_back(clip);
+    projectState_.playlistItems.push_back(item);
     projectState_.dirty = true;
     ++projectState_.revision;
     pushUndoState("Add clip", beforeState);
@@ -1542,14 +1999,15 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     return true;
 }
 
-bool AudioEngine::moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, double startTimeSeconds)
+bool AudioEngine::moveClip(
+    std::uint32_t clipId,
+    std::uint32_t targetTrackId,
+    double startTimeSeconds,
+    double durationSeconds)
 {
-    auto clipIt = std::find_if(
-        projectState_.clips.begin(),
-        projectState_.clips.end(),
-        [&](const ClipState& clip) { return clip.clipId == clipId; });
+    PlaylistItemState* clipIt = findPlaylistItem(clipId);
 
-    if (clipIt == projectState_.clips.end())
+    if (clipIt == nullptr)
     {
         setError(kErrorProjectIo, "Clip not found while moving clip.");
         return false;
@@ -1583,11 +2041,37 @@ bool AudioEngine::moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, do
                 previousTrackIt->clipIds.end());
         }
 
-        targetTrackIt->clipIds.push_back(clipId);
+        if (clipIt->type != PlaylistItemType::AutomationClip)
+        {
+            targetTrackIt->clipIds.push_back(clipId);
+        }
         clipIt->trackId = targetTrackId;
     }
 
     clipIt->startTimeSeconds = std::max(0.0, startTimeSeconds);
+    if (durationSeconds > 0.0)
+    {
+        clipIt->durationSeconds = std::max(0.125, durationSeconds);
+    }
+    if (clipIt->type == PlaylistItemType::AutomationClip)
+    {
+        AutomationClipState* automationClip = findAutomationClip(clipIt->automationClipId);
+        if (automationClip != nullptr)
+        {
+            automationClip->trackId = clipIt->trackId;
+            automationClip->startCell =
+                std::max(0, static_cast<int>(clipIt->startTimeSeconds / kPlaylistCellSeconds + 0.5));
+            if (durationSeconds > 0.0)
+            {
+                automationClip->lengthCells =
+                    std::max(2, static_cast<int>(clipIt->durationSeconds / kPlaylistCellSeconds + 0.5));
+            }
+        }
+    }
+    if (ClipState* sourceClip = findClipState(clipIt->sourceClipId); sourceClip != nullptr)
+    {
+        sourceClip->trackId = clipIt->trackId;
+    }
     projectState_.dirty = true;
     ++projectState_.revision;
     pushUndoState("Move clip", beforeState);
@@ -1647,9 +2131,18 @@ bool AudioEngine::newProject(const std::string& name)
     return true;
 }
 
-bool AudioEngine::saveProject(const std::string& path)
+bool AudioEngine::writeProjectFile(const std::string& path, bool updateSessionPath, bool clearDirtyState)
 {
-    const std::string resolvedPath = path.empty() ? config_.sessionPath : path;
+    const std::string resolvedPath = path.empty()
+        ? (updateSessionPath ? config_.sessionPath : projectState_.autosavePath)
+        : path;
+    const std::string sessionPathForFile = updateSessionPath ? resolvedPath : projectState_.sessionPath;
+    const std::string autosavePathForFile = updateSessionPath
+        ? makeAutosavePathForSession(resolvedPath)
+        : (projectState_.autosavePath.empty() ? makeAutosavePathForSession(projectState_.sessionPath) : projectState_.autosavePath);
+    const std::string recoveryPathForFile = updateSessionPath
+        ? autosavePathForFile
+        : (projectState_.recoveryPath.empty() ? autosavePathForFile : projectState_.recoveryPath);
     std::filesystem::path sessionPath = resolvedPath;
 
     if (sessionPath.has_parent_path())
@@ -1665,34 +2158,91 @@ bool AudioEngine::saveProject(const std::string& path)
         return false;
     }
 
-    stream << "PROJECT|" << projectState_.projectName << '|' << resolvedPath << '|' << projectState_.revision << '\n';
+    stream << "PROJECT|" << projectState_.projectName << '|' << sessionPathForFile << '|' << projectState_.revision << '\n';
+    stream
+        << "PROJECTMETA|" << (projectState_.autosaveEnabled ? 1 : 0) << '|'
+        << autosavePathForFile << '|'
+        << recoveryPathForFile << '|'
+        << projectState_.lastSavedRevision << '|'
+        << projectState_.lastAutosavedRevision << '|'
+        << (projectState_.recoveryAvailable ? 1 : 0) << '\n';
 
     for (const auto& bus : projectState_.buses)
     {
-        stream << "BUS|" << bus.busId << '|' << bus.name << '\n';
+        stream
+            << "BUS|" << bus.busId << '|'
+            << bus.name << '|'
+            << bus.gain << '|'
+            << bus.pan << '|'
+            << (bus.muted ? 1 : 0) << '|'
+            << (bus.solo ? 1 : 0) << '|'
+            << bus.outputBusId << '\n';
     }
 
     for (const auto& track : projectState_.tracks)
     {
         stream
-            << "TRACK|" << track.trackId << '|' << track.busId << '|'
+            << "TRACK|" << track.trackId << '|'
+            << track.busId << '|'
             << track.name << '|'
             << (track.armed ? 1 : 0) << '|'
             << (track.muted ? 1 : 0) << '|'
-            << (track.solo ? 1 : 0) << '\n';
+            << (track.solo ? 1 : 0) << '|'
+            << (track.recordEnabled ? 1 : 0) << '|'
+            << track.gain << '|'
+            << track.pan << '|'
+            << track.routeTargetBusId << '|'
+            << track.sendBusId << '|'
+            << track.sendAmount << '\n';
     }
 
     for (const auto& clip : projectState_.clips)
     {
         stream
-            << "CLIP|" << clip.clipId << '|' << clip.trackId << '|'
+            << "CLIP|" << clip.clipId << '|'
+            << clip.trackId << '|'
             << clip.name << '|'
             << static_cast<int>(clip.sourceType) << '|'
             << clip.filePath << '|'
             << clip.startTimeSeconds << '|'
             << clip.durationSeconds << '|'
             << clip.gain << '|'
-            << (clip.muted ? 1 : 0) << '\n';
+            << (clip.muted ? 1 : 0) << '|'
+            << clip.patternNumber << '|'
+            << clip.trimStartSeconds << '|'
+            << clip.trimEndSeconds << '|'
+            << clip.fadeInSeconds << '|'
+            << clip.fadeOutSeconds << '|'
+            << clip.pan << '|'
+            << clip.pitchSemitones << '|'
+            << clip.stretchRatio << '|'
+            << (clip.loopEnabled ? 1 : 0) << '|'
+            << (clip.timeStretchEnabled ? 1 : 0) << '\n';
+    }
+
+    for (const auto& item : projectState_.playlistItems)
+    {
+        stream
+            << "PLAYLIST|" << item.itemId << '|'
+            << item.trackId << '|'
+            << static_cast<int>(item.type) << '|'
+            << item.sourceClipId << '|'
+            << item.automationClipId << '|'
+            << item.patternNumber << '|'
+            << item.label << '|'
+            << item.startTimeSeconds << '|'
+            << item.durationSeconds << '|'
+            << item.trimStartSeconds << '|'
+            << item.trimEndSeconds << '|'
+            << item.fadeInSeconds << '|'
+            << item.fadeOutSeconds << '|'
+            << item.gain << '|'
+            << item.pan << '|'
+            << item.pitchSemitones << '|'
+            << item.stretchRatio << '|'
+            << (item.muted ? 1 : 0) << '|'
+            << (item.loopEnabled ? 1 : 0) << '|'
+            << (item.timeStretchEnabled ? 1 : 0) << '\n';
     }
 
     for (const auto& marker : projectState_.markers)
@@ -1700,11 +2250,142 @@ bool AudioEngine::saveProject(const std::string& path)
         stream << "MARKER|" << marker.markerId << '|' << marker.name << '|' << marker.timeSeconds << '\n';
     }
 
-    projectState_.sessionPath = resolvedPath;
-    projectState_.dirty = false;
-    config_.sessionPath = resolvedPath;
+    for (const auto& pattern : projectState_.patterns)
+    {
+        stream
+            << "PATTERN|" << pattern.patternNumber << '|'
+            << pattern.name << '|'
+            << pattern.lengthInBars << '|'
+            << pattern.accentAmount << '\n';
+
+        for (const auto& lane : pattern.lanes)
+        {
+            stream
+                << "PATTERNLANE|" << pattern.patternNumber << '|'
+                << lane.trackId << '|'
+                << lane.swing << '|'
+                << lane.shuffle << '\n';
+
+            for (std::size_t stepIndex = 0; stepIndex < lane.steps.size(); ++stepIndex)
+            {
+                const StepState& step = lane.steps[stepIndex];
+                stream
+                    << "STEP|" << pattern.patternNumber << '|'
+                    << lane.trackId << '|'
+                    << stepIndex << '|'
+                    << (step.enabled ? 1 : 0) << '|'
+                    << step.velocity << '\n';
+            }
+
+            for (const auto& note : lane.notes)
+            {
+                stream
+                    << "NOTE|" << pattern.patternNumber << '|'
+                    << lane.trackId << '|'
+                    << note.lane << '|'
+                    << note.step << '|'
+                    << note.length << '|'
+                    << note.velocity << '|'
+                    << (note.accent ? 1 : 0) << '|'
+                    << (note.slide ? 1 : 0) << '\n';
+            }
+        }
+    }
+
+    for (const auto& settings : projectState_.channelSettings)
+    {
+        stream
+            << "CHANNEL|" << settings.trackId << '|'
+            << settings.name << '|'
+            << static_cast<int>(settings.generatorType) << '|'
+            << settings.sampleFilePath << '|'
+            << settings.instrumentPluginName << '|'
+            << settings.gain << '|'
+            << settings.pan << '|'
+            << settings.pitchSemitones << '|'
+            << settings.attackMs << '|'
+            << settings.decayMs << '|'
+            << settings.sustainLevel << '|'
+            << settings.releaseMs << '|'
+            << settings.filterCutoffHz << '|'
+            << settings.resonance << '|'
+            << settings.mixerInsert << '|'
+            << settings.routeTarget << '|'
+            << (settings.reverse ? 1 : 0) << '|'
+            << (settings.timeStretch ? 1 : 0) << '|'
+            << joinString(settings.pluginRack, ',') << '|'
+            << joinString(settings.presets, ',') << '\n';
+    }
+
+    for (const auto& automationClip : projectState_.automationClips)
+    {
+        stream
+            << "AUTOCLIP|" << automationClip.clipId << '|'
+            << automationClip.target << '|'
+            << automationClip.trackId << '|'
+            << automationClip.lane << '|'
+            << automationClip.startCell << '|'
+            << automationClip.lengthCells << '\n';
+
+        for (const auto& point : automationClip.points)
+        {
+            stream
+                << "AUTOPOINT|" << automationClip.clipId << '|'
+                << point.cell << '|'
+                << point.value << '|'
+                << point.curve << '\n';
+        }
+    }
+
+    if (updateSessionPath)
+    {
+        projectState_.sessionPath = resolvedPath;
+        projectState_.autosavePath = makeAutosavePathForSession(resolvedPath);
+        projectState_.recoveryPath = projectState_.autosavePath;
+        config_.sessionPath = resolvedPath;
+    }
+
+    if (clearDirtyState)
+    {
+        projectState_.dirty = false;
+        projectState_.lastSavedRevision = projectState_.revision;
+        projectState_.recoveryAvailable = false;
+    }
+    else
+    {
+        projectState_.lastAutosavedRevision = projectState_.revision;
+        projectState_.recoveryPath = resolvedPath;
+        projectState_.recoveryAvailable = true;
+    }
+
     publishSnapshot();
     return true;
+}
+
+void AudioEngine::maybeAutosaveProject()
+{
+    if (!projectState_.autosaveEnabled || !projectState_.dirty)
+    {
+        return;
+    }
+
+    if (projectState_.autosavePath.empty())
+    {
+        projectState_.autosavePath = makeAutosavePathForSession(projectState_.sessionPath);
+    }
+
+    if (projectState_.lastAutosavedRevision == projectState_.revision)
+    {
+        return;
+    }
+
+    writeProjectFile(projectState_.autosavePath, false, false);
+}
+
+bool AudioEngine::saveProject(const std::string& path)
+{
+    const std::string resolvedPath = path.empty() ? config_.sessionPath : path;
+    return writeProjectFile(resolvedPath, true, true);
 }
 
 bool AudioEngine::loadProject(const std::string& path)
@@ -1719,6 +2400,9 @@ bool AudioEngine::loadProject(const std::string& path)
 
     ProjectState loadedProject{};
     loadedProject.sessionPath = resolvedPath;
+    loadedProject.autosaveEnabled = true;
+    loadedProject.autosavePath = makeAutosavePathForSession(resolvedPath);
+    loadedProject.recoveryPath = loadedProject.autosavePath;
 
     try
     {
@@ -1742,24 +2426,49 @@ bool AudioEngine::loadProject(const std::string& path)
                 loadedProject.sessionPath = parts[2];
                 loadedProject.revision = static_cast<std::uint64_t>(std::stoull(parts[3]));
             }
+            else if (parts[0] == "PROJECTMETA" && parts.size() >= 7)
+            {
+                loadedProject.autosaveEnabled = parseBoolToken(parts[1]);
+                loadedProject.autosavePath = parts[2];
+                loadedProject.recoveryPath = parts[3];
+                loadedProject.lastSavedRevision = static_cast<std::uint64_t>(std::stoull(parts[4]));
+                loadedProject.lastAutosavedRevision = static_cast<std::uint64_t>(std::stoull(parts[5]));
+                loadedProject.recoveryAvailable = parseBoolToken(parts[6]);
+            }
             else if (parts[0] == "BUS" && parts.size() >= 3)
             {
-                loadedProject.buses.push_back(BusState{
-                    static_cast<std::uint32_t>(std::stoul(parts[1])),
-                    parts[2],
-                    {}});
+                BusState bus{};
+                bus.busId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                bus.name = parts[2];
+                if (parts.size() >= 8)
+                {
+                    bus.gain = std::stod(parts[3]);
+                    bus.pan = std::stod(parts[4]);
+                    bus.muted = parseBoolToken(parts[5]);
+                    bus.solo = parseBoolToken(parts[6]);
+                    bus.outputBusId = static_cast<std::uint32_t>(std::stoul(parts[7]));
+                }
+                loadedProject.buses.push_back(std::move(bus));
             }
             else if (parts[0] == "TRACK" && parts.size() >= 7)
             {
-                loadedProject.tracks.push_back(TrackState{
-                    static_cast<std::uint32_t>(std::stoul(parts[1])),
-                    static_cast<std::uint32_t>(std::stoul(parts[2])),
-                    parts[3],
-                    parts[4] == "1",
-                    parts[5] == "1",
-                    parts[6] == "1",
-                    {},
-                    {}});
+                TrackState track{};
+                track.trackId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                track.busId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                track.name = parts[3];
+                track.armed = parseBoolToken(parts[4]);
+                track.muted = parseBoolToken(parts[5]);
+                track.solo = parseBoolToken(parts[6]);
+                if (parts.size() >= 13)
+                {
+                    track.recordEnabled = parseBoolToken(parts[7]);
+                    track.gain = std::stod(parts[8]);
+                    track.pan = std::stod(parts[9]);
+                    track.routeTargetBusId = static_cast<std::uint32_t>(std::stoul(parts[10]));
+                    track.sendBusId = static_cast<std::uint32_t>(std::stoul(parts[11]));
+                    track.sendAmount = std::stod(parts[12]);
+                }
+                loadedProject.tracks.push_back(std::move(track));
             }
             else if (parts[0] == "CLIP" && parts.size() >= 10)
             {
@@ -1772,8 +2481,46 @@ bool AudioEngine::loadProject(const std::string& path)
                 clip.startTimeSeconds = std::stod(parts[6]);
                 clip.durationSeconds = std::stod(parts[7]);
                 clip.gain = std::stod(parts[8]);
-                clip.muted = parts[9] == "1";
-                loadedProject.clips.push_back(clip);
+                clip.muted = parseBoolToken(parts[9]);
+                if (parts.size() >= 19)
+                {
+                    clip.patternNumber = std::stoi(parts[10]);
+                    clip.trimStartSeconds = std::stod(parts[11]);
+                    clip.trimEndSeconds = std::stod(parts[12]);
+                    clip.fadeInSeconds = std::stod(parts[13]);
+                    clip.fadeOutSeconds = std::stod(parts[14]);
+                    clip.pan = std::stod(parts[15]);
+                    clip.pitchSemitones = std::stod(parts[16]);
+                    clip.stretchRatio = std::stod(parts[17]);
+                    clip.loopEnabled = parseBoolToken(parts[18]);
+                    clip.timeStretchEnabled = parts.size() >= 20 ? parseBoolToken(parts[19]) : false;
+                }
+                loadedProject.clips.push_back(std::move(clip));
+            }
+            else if (parts[0] == "PLAYLIST" && parts.size() >= 20)
+            {
+                PlaylistItemState item{};
+                item.itemId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                item.trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                item.type = static_cast<PlaylistItemType>(std::stoi(parts[3]));
+                item.sourceClipId = static_cast<std::uint32_t>(std::stoul(parts[4]));
+                item.automationClipId = static_cast<std::uint32_t>(std::stoul(parts[5]));
+                item.patternNumber = std::stoi(parts[6]);
+                item.label = parts[7];
+                item.startTimeSeconds = std::stod(parts[8]);
+                item.durationSeconds = std::stod(parts[9]);
+                item.trimStartSeconds = std::stod(parts[10]);
+                item.trimEndSeconds = std::stod(parts[11]);
+                item.fadeInSeconds = std::stod(parts[12]);
+                item.fadeOutSeconds = std::stod(parts[13]);
+                item.gain = std::stod(parts[14]);
+                item.pan = std::stod(parts[15]);
+                item.pitchSemitones = std::stod(parts[16]);
+                item.stretchRatio = std::stod(parts[17]);
+                item.muted = parseBoolToken(parts[18]);
+                item.loopEnabled = parseBoolToken(parts[19]);
+                item.timeStretchEnabled = parts.size() >= 21 ? parseBoolToken(parts[20]) : false;
+                loadedProject.playlistItems.push_back(std::move(item));
             }
             else if (parts[0] == "MARKER" && parts.size() >= 4)
             {
@@ -1781,6 +2528,173 @@ bool AudioEngine::loadProject(const std::string& path)
                     static_cast<std::uint32_t>(std::stoul(parts[1])),
                     parts[2],
                     std::stod(parts[3])});
+            }
+            else if (parts[0] == "PATTERN" && parts.size() >= 5)
+            {
+                PatternState pattern{};
+                pattern.patternNumber = std::stoi(parts[1]);
+                pattern.name = parts[2];
+                pattern.lengthInBars = std::stoi(parts[3]);
+                pattern.accentAmount = std::stoi(parts[4]);
+                loadedProject.patterns.push_back(std::move(pattern));
+            }
+            else if (parts[0] == "PATTERNLANE" && parts.size() >= 5)
+            {
+                const int patternNumber = std::stoi(parts[1]);
+                auto patternIt = std::find_if(
+                    loadedProject.patterns.begin(),
+                    loadedProject.patterns.end(),
+                    [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+                if (patternIt == loadedProject.patterns.end())
+                {
+                    PatternState pattern{};
+                    pattern.patternNumber = patternNumber;
+                    pattern.name = "Pattern " + std::to_string(patternNumber);
+                    pattern.lengthInBars = 2;
+                    pattern.accentAmount = 0;
+                    loadedProject.patterns.push_back(std::move(pattern));
+                    patternIt = loadedProject.patterns.end() - 1;
+                }
+
+                PatternLaneState lane{};
+                lane.trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                lane.swing = std::stoi(parts[3]);
+                lane.shuffle = std::stoi(parts[4]);
+                patternIt->lanes.push_back(std::move(lane));
+            }
+            else if (parts[0] == "STEP" && parts.size() >= 6)
+            {
+                const int patternNumber = std::stoi(parts[1]);
+                const std::uint32_t trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                auto patternIt = std::find_if(
+                    loadedProject.patterns.begin(),
+                    loadedProject.patterns.end(),
+                    [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+                if (patternIt != loadedProject.patterns.end())
+                {
+                    auto laneIt = std::find_if(
+                        patternIt->lanes.begin(),
+                        patternIt->lanes.end(),
+                        [&](const PatternLaneState& lane) { return lane.trackId == trackId; });
+                    if (laneIt != patternIt->lanes.end())
+                    {
+                        const std::size_t stepIndex = static_cast<std::size_t>(std::stoul(parts[3]));
+                        if (laneIt->steps.size() <= stepIndex)
+                        {
+                            laneIt->steps.resize(stepIndex + 1);
+                        }
+                        laneIt->steps[stepIndex] = StepState{parseBoolToken(parts[4]), std::stoi(parts[5])};
+                    }
+                }
+            }
+            else if (parts[0] == "NOTE" && parts.size() >= 9)
+            {
+                const int patternNumber = std::stoi(parts[1]);
+                const std::uint32_t trackId = static_cast<std::uint32_t>(std::stoul(parts[2]));
+                auto patternIt = std::find_if(
+                    loadedProject.patterns.begin(),
+                    loadedProject.patterns.end(),
+                    [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+                if (patternIt != loadedProject.patterns.end())
+                {
+                    auto laneIt = std::find_if(
+                        patternIt->lanes.begin(),
+                        patternIt->lanes.end(),
+                        [&](const PatternLaneState& lane) { return lane.trackId == trackId; });
+                    if (laneIt != patternIt->lanes.end())
+                    {
+                        laneIt->notes.push_back(MidiNoteState{
+                            std::stoi(parts[3]),
+                            std::stoi(parts[4]),
+                            std::stoi(parts[5]),
+                            std::stoi(parts[6]),
+                            parseBoolToken(parts[7]),
+                            parseBoolToken(parts[8]),
+                            false});
+                    }
+                }
+            }
+            else if (parts[0] == "CHANNEL" && parts.size() >= 15)
+            {
+                ChannelSettingsState settings{};
+                settings.trackId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                settings.name = parts[2];
+
+                if (parts.size() >= 20)
+                {
+                    settings.generatorType = static_cast<GeneratorType>(std::stoi(parts[3]));
+                    settings.sampleFilePath = parts[4];
+                    settings.instrumentPluginName = parts[5];
+                    settings.gain = std::stod(parts[6]);
+                    settings.pan = std::stod(parts[7]);
+                    settings.pitchSemitones = std::stod(parts[8]);
+                    settings.attackMs = std::stod(parts[9]);
+                    settings.decayMs = std::stod(parts[10]);
+                    settings.sustainLevel = std::stod(parts[11]);
+                    settings.releaseMs = std::stod(parts[12]);
+                    settings.filterCutoffHz = std::stod(parts[13]);
+                    settings.resonance = std::stod(parts[14]);
+                    settings.mixerInsert = std::stoi(parts[15]);
+                    settings.routeTarget = std::stoi(parts[16]);
+                    settings.reverse = parseBoolToken(parts[17]);
+                    settings.timeStretch = parseBoolToken(parts[18]);
+                    settings.pluginRack = parts[19].empty() ? std::vector<std::string>{} : splitString(parts[19], ',');
+                    settings.presets = parts.size() >= 21 && !parts[20].empty() ? splitString(parts[20], ',') : std::vector<std::string>{};
+                }
+                else
+                {
+                    settings.gain = std::stod(parts[3]);
+                    settings.pan = std::stod(parts[4]);
+                    settings.pitchSemitones = std::stod(parts[5]);
+                    settings.attackMs = std::stod(parts[6]);
+                    settings.releaseMs = std::stod(parts[7]);
+                    settings.filterCutoffHz = std::stod(parts[8]);
+                    settings.resonance = std::stod(parts[9]);
+                    settings.mixerInsert = std::stoi(parts[10]);
+                    settings.routeTarget = std::stoi(parts[11]);
+                    settings.reverse = parseBoolToken(parts[12]);
+                    settings.timeStretch = parseBoolToken(parts[13]);
+                    settings.pluginRack = parts[14].empty() ? std::vector<std::string>{} : splitString(parts[14], ',');
+                    settings.presets = parts.size() >= 16 && !parts[15].empty() ? splitString(parts[15], ',') : std::vector<std::string>{};
+                }
+
+                loadedProject.channelSettings.push_back(std::move(settings));
+            }
+            else if (parts[0] == "AUTOCLIP" && parts.size() >= 6)
+            {
+                AutomationClipState clip{};
+                clip.clipId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                clip.target = parts[2];
+                if (parts.size() >= 7)
+                {
+                    clip.trackId = static_cast<std::uint32_t>(std::stoul(parts[3]));
+                    clip.lane = std::stoi(parts[4]);
+                    clip.startCell = std::stoi(parts[5]);
+                    clip.lengthCells = std::stoi(parts[6]);
+                }
+                else
+                {
+                    clip.lane = std::stoi(parts[3]);
+                    clip.startCell = std::stoi(parts[4]);
+                    clip.lengthCells = std::stoi(parts[5]);
+                }
+                loadedProject.automationClips.push_back(std::move(clip));
+            }
+            else if (parts[0] == "AUTOPOINT" && parts.size() >= 4)
+            {
+                const std::uint32_t clipId = static_cast<std::uint32_t>(std::stoul(parts[1]));
+                auto automationIt = std::find_if(
+                    loadedProject.automationClips.begin(),
+                    loadedProject.automationClips.end(),
+                    [&](const AutomationClipState& clip) { return clip.clipId == clipId; });
+                if (automationIt != loadedProject.automationClips.end())
+                {
+                    AutomationPointState point{};
+                    point.cell = std::stoi(parts[2]);
+                    point.value = std::stoi(parts[3]);
+                    point.curve = parts.size() >= 5 ? std::stod(parts[4]) : 0.0;
+                    automationIt->points.push_back(point);
+                }
             }
         }
     }
@@ -1797,20 +2711,33 @@ bool AudioEngine::loadProject(const std::string& path)
 
     if (loadedProject.buses.empty())
     {
-        loadedProject.buses.push_back(BusState{1, "Main Bus", {}});
+        BusState mainBus{};
+        mainBus.busId = 1;
+        mainBus.name = "Main Bus";
+        loadedProject.buses.push_back(std::move(mainBus));
     }
 
     if (loadedProject.tracks.empty())
     {
-        loadedProject.tracks.push_back(TrackState{
-            1,
-            loadedProject.buses.front().busId,
-            "Track 1",
-            false,
-            false,
-            false,
-            {},
-            {}});
+        TrackState track{};
+        track.trackId = 1;
+        track.busId = loadedProject.buses.front().busId;
+        track.name = "Track 1";
+        loadedProject.tracks.push_back(std::move(track));
+    }
+
+    if (loadedProject.autosavePath.empty())
+    {
+        loadedProject.autosavePath = makeAutosavePathForSession(resolvedPath);
+    }
+    if (loadedProject.recoveryPath.empty())
+    {
+        loadedProject.recoveryPath = loadedProject.autosavePath;
+    }
+
+    for (auto& bus : loadedProject.buses)
+    {
+        bus.inputTrackIds.clear();
     }
 
     for (auto& track : loadedProject.tracks)
@@ -1820,13 +2747,7 @@ bool AudioEngine::loadProject(const std::string& path)
             track.busId = loadedProject.buses.front().busId;
         }
 
-        for (const auto& clip : loadedProject.clips)
-        {
-            if (clip.trackId == track.trackId)
-            {
-                track.clipIds.push_back(clip.clipId);
-            }
-        }
+        track.clipIds.clear();
 
         auto busIt = std::find_if(
             loadedProject.buses.begin(),
@@ -1840,8 +2761,14 @@ bool AudioEngine::loadProject(const std::string& path)
     }
 
     projectState_ = std::move(loadedProject);
+    synchronizeProjectMusicalState();
     projectState_.dirty = false;
     projectState_.revision = std::max<std::uint64_t>(1, projectState_.revision + 1);
+    projectState_.lastSavedRevision = std::max(projectState_.lastSavedRevision, projectState_.revision);
+    projectState_.recoveryAvailable =
+        projectState_.autosaveEnabled &&
+        !projectState_.autosavePath.empty() &&
+        std::filesystem::exists(projectState_.autosavePath);
     undoStack_.clear();
     redoStack_.clear();
 
@@ -1870,6 +2797,7 @@ bool AudioEngine::undoLastEdit()
     projectState_ = action.before;
     projectState_.dirty = true;
     ++projectState_.revision;
+    synchronizeProjectMusicalState();
     requestGraphRebuild();
     publishSnapshot();
     return true;
@@ -1888,6 +2816,7 @@ bool AudioEngine::redoLastEdit()
     projectState_ = action.after;
     projectState_.dirty = true;
     ++projectState_.revision;
+    synchronizeProjectMusicalState();
     requestGraphRebuild();
     publishSnapshot();
     return true;
@@ -2004,33 +2933,589 @@ bool AudioEngine::initializeProjectState()
     projectState_.sessionPath = config_.sessionPath;
     projectState_.revision = 1;
     projectState_.dirty = false;
+    projectState_.autosaveEnabled = true;
+    projectState_.autosavePath = makeAutosavePathForSession(projectState_.sessionPath);
+    projectState_.recoveryPath = projectState_.autosavePath;
+    projectState_.lastSavedRevision = projectState_.revision;
 
     BusState mainBus{};
     mainBus.busId = 1;
     mainBus.name = "Main Bus";
+    mainBus.gain = 1.0;
+    mainBus.pan = 0.0;
 
     TrackState track{};
     track.trackId = 1;
     track.busId = mainBus.busId;
     track.name = "Track 1";
+    track.gain = 0.92;
+    track.pan = 0.0;
+    track.recordEnabled = false;
 
     ClipState clip{};
     clip.clipId = 1;
     clip.trackId = track.trackId;
     clip.name = "Demo Clip";
     clip.sourceType = ClipSourceType::GeneratedTone;
+    clip.patternNumber = 1;
     clip.startTimeSeconds = 0.0;
     clip.durationSeconds = 8.0;
     clip.gain = 0.7;
+    clip.loopEnabled = true;
+    clip.timeStretchEnabled = true;
 
-    track.clipIds.push_back(clip.clipId);
+    PlaylistItemState item{};
+    item.itemId = 1;
+    item.trackId = track.trackId;
+    item.type = PlaylistItemType::PatternClip;
+    item.sourceClipId = clip.clipId;
+    item.patternNumber = clip.patternNumber;
+    item.label = "Pattern 1";
+    item.startTimeSeconds = 0.0;
+    item.durationSeconds = 8.0;
+    item.gain = 0.84;
+    item.loopEnabled = true;
+    item.timeStretchEnabled = true;
+
+    track.clipIds.push_back(item.itemId);
     mainBus.inputTrackIds.push_back(track.trackId);
 
     projectState_.buses.push_back(mainBus);
     projectState_.tracks.push_back(track);
     projectState_.clips.push_back(clip);
+    projectState_.playlistItems.push_back(item);
     projectState_.markers.push_back(MarkerState{1, "Start", 0.0});
+    synchronizeProjectMusicalState();
     return true;
+}
+
+void AudioEngine::synchronizeProjectMusicalState()
+{
+    if (projectState_.autosavePath.empty())
+    {
+        projectState_.autosavePath = makeAutosavePathForSession(projectState_.sessionPath);
+    }
+    if (projectState_.recoveryPath.empty())
+    {
+        projectState_.recoveryPath = projectState_.autosavePath;
+    }
+
+    if (projectState_.playlistItems.empty())
+    {
+        for (const auto& clip : projectState_.clips)
+        {
+            PlaylistItemState item{};
+            item.itemId = nextPlaylistItemId();
+            item.trackId = clip.trackId;
+            item.type = clip.sourceType == ClipSourceType::AudioFile
+                ? PlaylistItemType::AudioClip
+                : PlaylistItemType::PatternClip;
+            item.sourceClipId = clip.clipId;
+            item.patternNumber = clip.patternNumber > 0 ? clip.patternNumber : extractPatternNumberFromClipName(clip.name);
+            item.label = clip.name;
+            item.startTimeSeconds = clip.startTimeSeconds;
+            item.durationSeconds = clip.durationSeconds;
+            item.trimStartSeconds = clip.trimStartSeconds;
+            item.trimEndSeconds = clip.trimEndSeconds;
+            item.fadeInSeconds = clip.fadeInSeconds;
+            item.fadeOutSeconds = clip.fadeOutSeconds;
+            item.gain = clip.gain;
+            item.pan = clip.pan;
+            item.pitchSemitones = clip.pitchSemitones;
+            item.stretchRatio = clip.stretchRatio <= 0.0 ? 1.0 : clip.stretchRatio;
+            item.muted = clip.muted;
+            item.loopEnabled = clip.loopEnabled;
+            item.timeStretchEnabled = clip.timeStretchEnabled;
+            projectState_.playlistItems.push_back(std::move(item));
+        }
+    }
+
+    for (auto& item : projectState_.playlistItems)
+    {
+        item.durationSeconds = std::max(0.125, item.durationSeconds);
+        item.trimStartSeconds = std::max(0.0, item.trimStartSeconds);
+        item.trimEndSeconds = std::max(0.0, item.trimEndSeconds);
+        item.fadeInSeconds = std::max(0.0, item.fadeInSeconds);
+        item.fadeOutSeconds = std::max(0.0, item.fadeOutSeconds);
+        item.gain = std::clamp(item.gain, 0.0, 4.0);
+        item.pan = std::clamp(item.pan, -1.0, 1.0);
+        item.stretchRatio = item.stretchRatio <= 0.0 ? 1.0 : item.stretchRatio;
+
+        if ((item.type == PlaylistItemType::PatternClip || item.type == PlaylistItemType::AudioClip) && item.sourceClipId != 0)
+        {
+            if (const ClipState* sourceClip = findClipState(item.sourceClipId); sourceClip != nullptr)
+            {
+                if (item.label.empty())
+                {
+                    item.label = sourceClip->name;
+                }
+                if (item.patternNumber == 0)
+                {
+                    item.patternNumber = sourceClip->patternNumber > 0
+                        ? sourceClip->patternNumber
+                        : extractPatternNumberFromClipName(sourceClip->name);
+                }
+            }
+        }
+    }
+
+    for (auto& automationClip : projectState_.automationClips)
+    {
+        automationClip.trackId = automationClip.trackId == 0 && !projectState_.tracks.empty()
+            ? projectState_.tracks.front().trackId
+            : automationClip.trackId;
+
+        auto playlistAutomationIt = std::find_if(
+            projectState_.playlistItems.begin(),
+            projectState_.playlistItems.end(),
+            [&](const PlaylistItemState& item)
+            {
+                return item.type == PlaylistItemType::AutomationClip &&
+                    item.automationClipId == automationClip.clipId;
+            });
+
+        if (playlistAutomationIt == projectState_.playlistItems.end())
+        {
+            PlaylistItemState item{};
+            item.itemId = automationClip.clipId;
+            item.trackId = automationClip.trackId;
+            item.type = PlaylistItemType::AutomationClip;
+            item.automationClipId = automationClip.clipId;
+            item.label = automationClip.target;
+            item.startTimeSeconds = static_cast<double>(std::max(0, automationClip.startCell)) * kPlaylistCellSeconds;
+            item.durationSeconds = static_cast<double>(std::max(1, automationClip.lengthCells)) * kPlaylistCellSeconds;
+            item.gain = 1.0;
+            projectState_.playlistItems.push_back(std::move(item));
+        }
+        else
+        {
+            playlistAutomationIt->itemId = automationClip.clipId;
+            playlistAutomationIt->trackId = automationClip.trackId;
+            playlistAutomationIt->label = automationClip.target;
+            playlistAutomationIt->startTimeSeconds =
+                static_cast<double>(std::max(0, automationClip.startCell)) * kPlaylistCellSeconds;
+            playlistAutomationIt->durationSeconds =
+                static_cast<double>(std::max(1, automationClip.lengthCells)) * kPlaylistCellSeconds;
+        }
+    }
+
+    for (auto& clip : projectState_.clips)
+    {
+        clip.patternNumber = clip.patternNumber > 0 ? clip.patternNumber : extractPatternNumberFromClipName(clip.name);
+        clip.trimStartSeconds = std::max(0.0, clip.trimStartSeconds);
+        clip.trimEndSeconds = std::max(0.0, clip.trimEndSeconds);
+        clip.fadeInSeconds = std::max(0.0, clip.fadeInSeconds);
+        clip.fadeOutSeconds = std::max(0.0, clip.fadeOutSeconds);
+        clip.gain = std::clamp(clip.gain, 0.0, 4.0);
+        clip.pan = std::clamp(clip.pan, -1.0, 1.0);
+        clip.stretchRatio = clip.stretchRatio <= 0.0 ? 1.0 : clip.stretchRatio;
+    }
+
+    if (projectState_.patterns.empty())
+    {
+        for (int patternNumber = 1; patternNumber <= kDefaultPatternCount; ++patternNumber)
+        {
+            projectState_.patterns.push_back(makeDefaultPatternState(patternNumber));
+        }
+    }
+
+    for (auto& pattern : projectState_.patterns)
+    {
+        std::vector<PatternLaneState> synchronizedLanes;
+        synchronizedLanes.reserve(projectState_.tracks.size());
+
+        for (std::size_t trackIndex = 0; trackIndex < projectState_.tracks.size(); ++trackIndex)
+        {
+            const TrackState& track = projectState_.tracks[trackIndex];
+            PatternLaneState* existingLane = findPatternLane(pattern, track.trackId);
+            if (existingLane != nullptr)
+            {
+                if (existingLane->steps.size() != static_cast<std::size_t>(kDefaultStepCount))
+                {
+                    existingLane->steps.resize(static_cast<std::size_t>(kDefaultStepCount));
+                }
+                synchronizedLanes.push_back(*existingLane);
+            }
+            else
+            {
+                synchronizedLanes.push_back(makeDefaultPatternLane(track.trackId, pattern.patternNumber, trackIndex));
+            }
+        }
+
+        pattern.lanes = std::move(synchronizedLanes);
+    }
+
+    std::vector<ChannelSettingsState> synchronizedSettings;
+    synchronizedSettings.reserve(projectState_.tracks.size());
+    for (std::size_t trackIndex = 0; trackIndex < projectState_.tracks.size(); ++trackIndex)
+    {
+        const TrackState& track = projectState_.tracks[trackIndex];
+        ChannelSettingsState* settings = findChannelSettings(track.trackId);
+        if (settings != nullptr)
+        {
+            settings->name = track.name;
+            synchronizedSettings.push_back(*settings);
+        }
+        else
+        {
+            synchronizedSettings.push_back(makeDefaultChannelSettings(track.trackId, trackIndex));
+        }
+    }
+    projectState_.channelSettings = std::move(synchronizedSettings);
+
+    for (auto& track : projectState_.tracks)
+    {
+        track.gain = std::clamp(track.gain, 0.0, 4.0);
+        track.pan = std::clamp(track.pan, -1.0, 1.0);
+        track.sendAmount = std::clamp(track.sendAmount, 0.0, 1.0);
+        track.clipIds.clear();
+        for (const auto& item : projectState_.playlistItems)
+        {
+            if (item.trackId == track.trackId && item.type != PlaylistItemType::AutomationClip)
+            {
+                track.clipIds.push_back(item.itemId);
+            }
+        }
+    }
+
+    if (projectState_.automationClips.empty())
+    {
+        projectState_.automationClips.push_back(AutomationClipState{
+            nextAutomationClipId(),
+            "Bus:1:gain",
+            {{0, 84, 0.0}, {8, 78, 0.0}, {16, 90, 0.0}, {24, 82, 0.0}},
+            projectState_.tracks.empty() ? 0u : projectState_.tracks.front().trackId,
+            static_cast<int>(projectState_.tracks.size()),
+            0,
+            8});
+
+        const AutomationClipState& automationClip = projectState_.automationClips.back();
+        projectState_.playlistItems.push_back(PlaylistItemState{
+            automationClip.clipId,
+            automationClip.trackId,
+            PlaylistItemType::AutomationClip,
+            0,
+            automationClip.clipId,
+            0,
+            automationClip.target,
+            static_cast<double>(std::max(0, automationClip.startCell)) * kPlaylistCellSeconds,
+            static_cast<double>(std::max(1, automationClip.lengthCells)) * kPlaylistCellSeconds,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            false,
+            false,
+            false});
+    }
+}
+
+AudioEngine::PatternState* AudioEngine::findPatternState(int patternNumber)
+{
+    auto it = std::find_if(
+        projectState_.patterns.begin(),
+        projectState_.patterns.end(),
+        [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+    return it == projectState_.patterns.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::PatternState* AudioEngine::findPatternState(int patternNumber) const
+{
+    auto it = std::find_if(
+        projectState_.patterns.begin(),
+        projectState_.patterns.end(),
+        [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+    return it == projectState_.patterns.end() ? nullptr : &(*it);
+}
+
+AudioEngine::PatternLaneState* AudioEngine::findPatternLane(PatternState& pattern, std::uint32_t trackId)
+{
+    auto it = std::find_if(
+        pattern.lanes.begin(),
+        pattern.lanes.end(),
+        [&](const PatternLaneState& lane) { return lane.trackId == trackId; });
+    return it == pattern.lanes.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::PatternLaneState* AudioEngine::findPatternLane(const PatternState& pattern, std::uint32_t trackId) const
+{
+    auto it = std::find_if(
+        pattern.lanes.begin(),
+        pattern.lanes.end(),
+        [&](const PatternLaneState& lane) { return lane.trackId == trackId; });
+    return it == pattern.lanes.end() ? nullptr : &(*it);
+}
+
+AudioEngine::ClipState* AudioEngine::findClipState(std::uint32_t clipId)
+{
+    auto it = std::find_if(
+        projectState_.clips.begin(),
+        projectState_.clips.end(),
+        [&](const ClipState& clip) { return clip.clipId == clipId; });
+    return it == projectState_.clips.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::ClipState* AudioEngine::findClipState(std::uint32_t clipId) const
+{
+    auto it = std::find_if(
+        projectState_.clips.begin(),
+        projectState_.clips.end(),
+        [&](const ClipState& clip) { return clip.clipId == clipId; });
+    return it == projectState_.clips.end() ? nullptr : &(*it);
+}
+
+AudioEngine::PlaylistItemState* AudioEngine::findPlaylistItem(std::uint32_t itemId)
+{
+    auto it = std::find_if(
+        projectState_.playlistItems.begin(),
+        projectState_.playlistItems.end(),
+        [&](const PlaylistItemState& item) { return item.itemId == itemId; });
+    return it == projectState_.playlistItems.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::PlaylistItemState* AudioEngine::findPlaylistItem(std::uint32_t itemId) const
+{
+    auto it = std::find_if(
+        projectState_.playlistItems.begin(),
+        projectState_.playlistItems.end(),
+        [&](const PlaylistItemState& item) { return item.itemId == itemId; });
+    return it == projectState_.playlistItems.end() ? nullptr : &(*it);
+}
+
+AudioEngine::BusState* AudioEngine::findBusState(std::uint32_t busId)
+{
+    auto it = std::find_if(
+        projectState_.buses.begin(),
+        projectState_.buses.end(),
+        [&](const BusState& bus) { return bus.busId == busId; });
+    return it == projectState_.buses.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::BusState* AudioEngine::findBusState(std::uint32_t busId) const
+{
+    auto it = std::find_if(
+        projectState_.buses.begin(),
+        projectState_.buses.end(),
+        [&](const BusState& bus) { return bus.busId == busId; });
+    return it == projectState_.buses.end() ? nullptr : &(*it);
+}
+
+AudioEngine::ChannelSettingsState* AudioEngine::findChannelSettings(std::uint32_t trackId)
+{
+    auto it = std::find_if(
+        projectState_.channelSettings.begin(),
+        projectState_.channelSettings.end(),
+        [&](const ChannelSettingsState& settings) { return settings.trackId == trackId; });
+    return it == projectState_.channelSettings.end() ? nullptr : &(*it);
+}
+
+const AudioEngine::ChannelSettingsState* AudioEngine::findChannelSettings(std::uint32_t trackId) const
+{
+    auto it = std::find_if(
+        projectState_.channelSettings.begin(),
+        projectState_.channelSettings.end(),
+        [&](const ChannelSettingsState& settings) { return settings.trackId == trackId; });
+    return it == projectState_.channelSettings.end() ? nullptr : &(*it);
+}
+
+AudioEngine::AutomationClipState* AudioEngine::findAutomationClip(std::uint32_t clipId)
+{
+    auto it = std::find_if(
+        projectState_.automationClips.begin(),
+        projectState_.automationClips.end(),
+        [&](const AutomationClipState& clip) { return clip.clipId == clipId; });
+    return it == projectState_.automationClips.end() ? nullptr : &(*it);
+}
+
+double AudioEngine::evaluateAutomationTarget(const std::string& target, double timelineSeconds, double defaultValue) const
+{
+    if (target.empty())
+    {
+        return defaultValue;
+    }
+
+    const std::string desiredTarget = toLowerCopy(target);
+    const double timelineCell = timelineSeconds / kPlaylistCellSeconds;
+
+    auto convertValue =
+        [&](double normalizedValue, const std::string& normalizedTarget) -> double
+    {
+        const double clamped = std::clamp(normalizedValue, 0.0, 1.0);
+        if (normalizedTarget.find(":pan") != std::string::npos)
+        {
+            return (clamped * 2.0) - 1.0;
+        }
+        if (normalizedTarget.find(":cutoff") != std::string::npos)
+        {
+            return 200.0 + (clamped * 15800.0);
+        }
+        if (normalizedTarget.find(":gain") != std::string::npos || normalizedTarget == "master volume")
+        {
+            return clamped;
+        }
+        return clamped;
+    };
+
+    for (const auto& automationClip : projectState_.automationClips)
+    {
+        const std::string clipTarget = toLowerCopy(automationClip.target);
+        const bool targetMatches =
+            clipTarget == desiredTarget ||
+            (desiredTarget == "master:gain" && (clipTarget == "master volume" || clipTarget == "bus:1:gain")) ||
+            (desiredTarget == "bus:1:gain" && clipTarget == "master volume");
+
+        if (!targetMatches || automationClip.points.empty())
+        {
+            continue;
+        }
+
+        const double clipStartCell = static_cast<double>(std::max(0, automationClip.startCell));
+        const double clipEndCell = clipStartCell + static_cast<double>(std::max(1, automationClip.lengthCells));
+        if (timelineCell < clipStartCell || timelineCell > clipEndCell)
+        {
+            continue;
+        }
+
+        const AutomationPointState* previousPoint = &automationClip.points.front();
+        const AutomationPointState* nextPoint = previousPoint;
+
+        for (const auto& point : automationClip.points)
+        {
+            if (point.cell <= timelineCell)
+            {
+                previousPoint = &point;
+            }
+            if (point.cell >= timelineCell)
+            {
+                nextPoint = &point;
+                break;
+            }
+        }
+
+        if (nextPoint == nullptr)
+        {
+            nextPoint = previousPoint;
+        }
+
+        if (previousPoint == nullptr || nextPoint == nullptr)
+        {
+            continue;
+        }
+
+        if (previousPoint == nextPoint || nextPoint->cell == previousPoint->cell)
+        {
+            return convertValue(static_cast<double>(previousPoint->value) / 100.0, desiredTarget);
+        }
+
+        const double t =
+            (timelineCell - static_cast<double>(previousPoint->cell)) /
+            static_cast<double>(std::max(1, nextPoint->cell - previousPoint->cell));
+        const double interpolatedValue =
+            static_cast<double>(previousPoint->value) +
+            ((static_cast<double>(nextPoint->value) - static_cast<double>(previousPoint->value)) * t);
+        return convertValue(interpolatedValue / 100.0, desiredTarget);
+    }
+
+    return defaultValue;
+}
+
+bool AudioEngine::hasSoloedTracks() const
+{
+    return std::any_of(
+        projectState_.tracks.begin(),
+        projectState_.tracks.end(),
+        [](const TrackState& track) { return track.solo; });
+}
+
+bool AudioEngine::hasSoloedBuses() const
+{
+    return std::any_of(
+        projectState_.buses.begin(),
+        projectState_.buses.end(),
+        [](const BusState& bus) { return bus.solo; });
+}
+
+AudioEngine::PatternLaneState AudioEngine::makeDefaultPatternLane(std::uint32_t trackId, int patternNumber, std::size_t laneIndex) const
+{
+    PatternLaneState lane{};
+    lane.trackId = trackId;
+    lane.steps.resize(static_cast<std::size_t>(kDefaultStepCount));
+
+    for (int stepIndex = 0; stepIndex < kDefaultStepCount; ++stepIndex)
+    {
+        const int patternOffset = patternNumber - 1;
+        const bool onQuarter = ((stepIndex + patternOffset) % 4) == 0;
+        const bool grooveHit =
+            ((stepIndex + static_cast<int>(laneIndex) + patternOffset) % (patternNumber + 3)) == 0;
+        lane.steps[static_cast<std::size_t>(stepIndex)].enabled = onQuarter || grooveHit;
+        lane.steps[static_cast<std::size_t>(stepIndex)].velocity =
+            68 + ((stepIndex * (patternNumber + 6) + static_cast<int>(laneIndex) * 11) % 56);
+    }
+
+    lane.swing = static_cast<int>((laneIndex * 9 + static_cast<std::size_t>(patternNumber) * 5) % 48);
+    lane.shuffle = static_cast<int>((laneIndex * 5 + static_cast<std::size_t>(patternNumber) * 7) % 32);
+
+    const int rootLane = 12 + static_cast<int>((laneIndex * 3) % 7);
+    lane.notes.push_back(MidiNoteState{rootLane, 0, 3, 98, true, false, false});
+    lane.notes.push_back(MidiNoteState{rootLane + 4, 4, 2, 84, false, false, false});
+    lane.notes.push_back(MidiNoteState{rootLane + 7, 8, 4, 102, false, false, false});
+    lane.notes.push_back(MidiNoteState{rootLane + 12, 14, 2, 92, false, (laneIndex % 2) == 0, false});
+    return lane;
+}
+
+AudioEngine::PatternState AudioEngine::makeDefaultPatternState(int patternNumber) const
+{
+    PatternState pattern{};
+    pattern.patternNumber = patternNumber;
+    pattern.name = "Pattern " + std::to_string(patternNumber);
+    pattern.lengthInBars = 2 + ((patternNumber - 1) % 3);
+    pattern.accentAmount = 8 * patternNumber;
+
+    for (std::size_t trackIndex = 0; trackIndex < projectState_.tracks.size(); ++trackIndex)
+    {
+        pattern.lanes.push_back(
+            makeDefaultPatternLane(
+                projectState_.tracks[trackIndex].trackId,
+                patternNumber,
+                trackIndex + static_cast<std::size_t>(patternNumber - 1)));
+    }
+
+    return pattern;
+}
+
+AudioEngine::ChannelSettingsState AudioEngine::makeDefaultChannelSettings(std::uint32_t trackId, std::size_t laneIndex) const
+{
+    ChannelSettingsState settings{};
+    settings.trackId = trackId;
+
+    auto trackIt = std::find_if(
+        projectState_.tracks.begin(),
+        projectState_.tracks.end(),
+        [&](const TrackState& track) { return track.trackId == trackId; });
+    settings.name = trackIt == projectState_.tracks.end() ? ("Channel " + std::to_string(trackId)) : trackIt->name;
+    settings.generatorType = laneIndex % 3 == 2 ? GeneratorType::PluginInstrument : (laneIndex % 2 == 0 ? GeneratorType::Sampler : GeneratorType::TestSynth);
+    settings.gain = 0.78 + (0.03 * static_cast<double>(laneIndex % 3));
+    settings.pan = laneIndex % 3 == 0 ? -0.08 : (laneIndex % 4 == 0 ? 0.10 : 0.0);
+    settings.pitchSemitones = static_cast<double>((laneIndex % 5) - 2);
+    settings.attackMs = 10.0 + static_cast<double>(laneIndex * 2);
+    settings.decayMs = 64.0 + static_cast<double>(laneIndex * 8);
+    settings.sustainLevel = 0.72 + (0.04 * static_cast<double>(laneIndex % 3));
+    settings.releaseMs = 160.0 + static_cast<double>(laneIndex * 18);
+    settings.filterCutoffHz = 7600.0 + static_cast<double>((laneIndex % 4) * 900);
+    settings.resonance = 0.18 + (0.04 * static_cast<double>(laneIndex % 3));
+    settings.mixerInsert = static_cast<int>(laneIndex + 1);
+    settings.routeTarget = 0;
+    settings.reverse = false;
+    settings.timeStretch = true;
+    settings.sampleFilePath.clear();
+    settings.instrumentPluginName = settings.generatorType == GeneratorType::PluginInstrument ? "Future VSTi Rack" : "";
+    settings.pluginRack = {"Sampler", laneIndex % 2 == 0 ? "Transient" : "EQ"};
+    settings.presets = {"Init", "Tight", "Wide"};
+    return settings;
 }
 
 AudioEngine::GraphSnapshot AudioEngine::buildGraphFromProjectState() const
@@ -2062,10 +3547,10 @@ AudioEngine::GraphSnapshot AudioEngine::buildGraphFromProjectState() const
             0,
             bus.busId,
             0,
-            1.0,
+            bus.gain,
             false,
             true,
-            false,
+            bus.muted,
             true});
     }
 
@@ -2080,7 +3565,7 @@ AudioEngine::GraphSnapshot AudioEngine::buildGraphFromProjectState() const
             track.trackId,
             track.busId,
             0,
-            1.0,
+            track.gain,
             liveTrack,
             !liveTrack,
             track.muted,
@@ -2100,9 +3585,37 @@ AudioEngine::GraphSnapshot AudioEngine::buildGraphFromProjectState() const
             false,
             true});
 
+        if (track.sendBusId != 0 && track.sendAmount > 0.0 && findBusState(track.sendBusId) != nullptr)
+        {
+            graph.nodes.push_back(GraphNode{
+                sendNodeId(track.trackId),
+                NodeType::Send,
+                track.name + " Send",
+                0,
+                track.trackId,
+                track.sendBusId,
+                0,
+                std::clamp(track.sendAmount, 0.0, 1.0),
+                liveTrack,
+                !liveTrack,
+                false,
+                true});
+        }
+
         graph.edges.push_back(GraphEdge{kInputNodeId, trackNodeId(track.trackId)});
         graph.edges.push_back(GraphEdge{trackNodeId(track.trackId), pluginNodeId(track.trackId)});
-        graph.edges.push_back(GraphEdge{pluginNodeId(track.trackId), busNodeId(track.busId)});
+
+        const std::uint32_t routeBusId =
+            track.routeTargetBusId != 0 && findBusState(track.routeTargetBusId) != nullptr
+                ? track.routeTargetBusId
+                : track.busId;
+        graph.edges.push_back(GraphEdge{pluginNodeId(track.trackId), busNodeId(routeBusId)});
+
+        if (track.sendBusId != 0 && track.sendBusId != routeBusId && findBusState(track.sendBusId) != nullptr)
+        {
+            graph.edges.push_back(GraphEdge{pluginNodeId(track.trackId), sendNodeId(track.trackId)});
+            graph.edges.push_back(GraphEdge{sendNodeId(track.trackId), busNodeId(track.sendBusId)});
+        }
     }
 
     graph.nodes.push_back(GraphNode{
@@ -2121,7 +3634,14 @@ AudioEngine::GraphSnapshot AudioEngine::buildGraphFromProjectState() const
 
     for (const auto& bus : projectState_.buses)
     {
-        graph.edges.push_back(GraphEdge{busNodeId(bus.busId), kOutputNodeId});
+        if (bus.outputBusId != 0 && bus.outputBusId != bus.busId && findBusState(bus.outputBusId) != nullptr)
+        {
+            graph.edges.push_back(GraphEdge{busNodeId(bus.busId), busNodeId(bus.outputBusId)});
+        }
+        else
+        {
+            graph.edges.push_back(GraphEdge{busNodeId(bus.busId), kOutputNodeId});
+        }
     }
 
     return graph;
@@ -2745,6 +4265,10 @@ void AudioEngine::audioThreadMain()
         const auto blockStart = Clock::now();
 
         processPendingCommands();
+        if (!running_.load() || audioThreadState_.stopRequested.load())
+        {
+            break;
+        }
 
         if (graphSwapPending_)
         {
@@ -2816,6 +4340,14 @@ void AudioEngine::audioThreadMain()
     stopAudioStream();
     audioThreadState_.running.store(false);
 
+    if (state_.load() != EngineState::Error)
+    {
+        state_.store(EngineState::Stopped);
+    }
+
+    updateStatusFromState();
+    publishSnapshot();
+
 #if defined(DAW_ENABLE_WASAPI) && (DAW_ENABLE_WASAPI == 1)
     if (audioThreadState_.mmcssRegistered)
     {
@@ -2834,8 +4366,38 @@ void AudioEngine::maintenanceThreadMain()
 {
     while (telemetryRunning_.load())
     {
+        if (!running_.load())
+        {
+            if (audioThread_.joinable() && !audioThreadState_.running.load())
+            {
+                audioThread_.join();
+            }
+
+            for (auto& thread : helperThreads_)
+            {
+                if (thread.joinable())
+                {
+                    thread.join();
+                }
+            }
+            helperThreads_.clear();
+
+            if (diskThread_.joinable())
+            {
+                diskThread_.join();
+            }
+
+            processPendingCommands();
+
+            if (!running_.load() && graphSwapPending_)
+            {
+                swapCompiledGraphAtSafePoint();
+            }
+        }
+
         serviceSandboxWatchdogs();
         serviceClipCacheEviction();
+        maybeAutosaveProject();
         std::this_thread::sleep_for(std::chrono::milliseconds(kMaintenanceTickMs));
     }
 }
@@ -2919,6 +4481,9 @@ bool AudioEngine::renderGraphBlock(RenderContext& renderContext, AudioBuffer& ou
 
     std::unordered_map<std::uint32_t, AudioBuffer> nodeOutputs;
     const GraphSnapshot& graph = editableGraph_;
+    const double sampleRate = static_cast<double>(std::max(1u, renderContext.callback.sampleRate));
+    const double blockStartSeconds =
+        static_cast<double>(renderContext.callback.transportSampleStart) / sampleRate;
 
     for (const auto& stage : compiledGraph_.stages)
     {
@@ -2985,6 +4550,41 @@ bool AudioEngine::renderGraphBlock(RenderContext& renderContext, AudioBuffer& ou
                 const double totalGain = nodeGain * automationValue;
                 nodeBuffer.left[frame] *= totalGain;
                 nodeBuffer.right[frame] *= totalGain;
+            }
+
+            if (graphNode.type == NodeType::Bus)
+            {
+                const BusState* bus = findBusState(graphNode.busId);
+                if (bus == nullptr || bus->muted || (hasSoloedBuses() && !bus->solo))
+                {
+                    nodeBuffer.clear();
+                }
+                else
+                {
+                    const double busGain = evaluateAutomationTarget(
+                        "Bus:" + std::to_string(bus->busId) + ":gain",
+                        blockStartSeconds,
+                        1.0);
+                    const double busPan = evaluateAutomationTarget(
+                        "Bus:" + std::to_string(bus->busId) + ":pan",
+                        blockStartSeconds,
+                        bus->pan);
+                    const auto [leftPan, rightPan] = stereoPanGains(busPan);
+                    for (std::uint32_t frame = 0; frame < nodeBuffer.frameCount; ++frame)
+                    {
+                        nodeBuffer.left[frame] *= leftPan * busGain;
+                        nodeBuffer.right[frame] *= rightPan * busGain;
+                    }
+                }
+            }
+            else if (graphNode.type == NodeType::Output || graphNode.type == NodeType::RenderSink)
+            {
+                const double masterGain = evaluateAutomationTarget("Master:gain", blockStartSeconds, 1.0);
+                for (std::uint32_t frame = 0; frame < nodeBuffer.frameCount; ++frame)
+                {
+                    nodeBuffer.left[frame] *= masterGain;
+                    nodeBuffer.right[frame] *= masterGain;
+                }
             }
 
             if (graphNode.type == NodeType::Plugin)
@@ -3060,28 +4660,69 @@ void AudioEngine::renderTrackClips(std::uint32_t trackId, const RenderContext& r
         projectState_.tracks.end(),
         [&](const TrackState& track) { return track.trackId == trackId; });
 
-    if (trackIt == projectState_.tracks.end() || trackIt->muted)
+    if (trackIt == projectState_.tracks.end() || trackIt->muted || (hasSoloedTracks() && !trackIt->solo))
     {
         return;
     }
 
     const std::uint64_t blockStartSample = renderContext.callback.transportSampleStart;
     const double sampleRate = static_cast<double>(std::max(1u, renderContext.callback.sampleRate));
+    const double blockStartSeconds = static_cast<double>(blockStartSample) / sampleRate;
+    const ChannelSettingsState* channelSettings = findChannelSettings(trackId);
 
-    for (const std::uint32_t clipId : trackIt->clipIds)
+    ChannelSettingsState defaultChannelSettings{};
+    defaultChannelSettings.trackId = trackId;
+    defaultChannelSettings.name = trackIt->name;
+    const ChannelSettingsState& settings = channelSettings == nullptr ? defaultChannelSettings : *channelSettings;
+    const double trackGainAutomation = evaluateAutomationTarget(
+        "Track:" + std::to_string(trackId) + ":gain",
+        blockStartSeconds,
+        1.0);
+    const double trackPan = evaluateAutomationTarget(
+        "Track:" + std::to_string(trackId) + ":pan",
+        blockStartSeconds,
+        trackIt->pan);
+    const double channelGain = evaluateAutomationTarget(
+        "Channel:" + std::to_string(trackId) + ":gain",
+        blockStartSeconds,
+        settings.gain);
+    const double channelPan = evaluateAutomationTarget(
+        "Channel:" + std::to_string(trackId) + ":pan",
+        blockStartSeconds,
+        settings.pan);
+    const double cutoffHz = evaluateAutomationTarget(
+        "Channel:" + std::to_string(trackId) + ":cutoff",
+        blockStartSeconds,
+        settings.filterCutoffHz);
+
+    for (const std::uint32_t itemId : trackIt->clipIds)
     {
-        const auto clipIt = std::find_if(
-            projectState_.clips.begin(),
-            projectState_.clips.end(),
-            [&](const ClipState& clip) { return clip.clipId == clipId; });
-
-        if (clipIt == projectState_.clips.end() || clipIt->muted)
+        const PlaylistItemState* item = findPlaylistItem(itemId);
+        if (item == nullptr || item->muted || item->type == PlaylistItemType::AutomationClip)
         {
             continue;
         }
 
-        const std::uint64_t clipStartSample = static_cast<std::uint64_t>(clipIt->startTimeSeconds * sampleRate);
-        const std::uint64_t clipEndSample = clipStartSample + static_cast<std::uint64_t>(clipIt->durationSeconds * sampleRate);
+        const ClipState* sourceClip = item->sourceClipId == 0 ? nullptr : findClipState(item->sourceClipId);
+        if (sourceClip == nullptr && item->type == PlaylistItemType::AudioClip)
+        {
+            continue;
+        }
+
+        const std::uint64_t clipStartSample = static_cast<std::uint64_t>(item->startTimeSeconds * sampleRate);
+        const std::uint64_t clipEndSample = clipStartSample + static_cast<std::uint64_t>(item->durationSeconds * sampleRate);
+        const double trimStartSeconds = item->trimStartSeconds > 0.0
+            ? item->trimStartSeconds
+            : (sourceClip == nullptr ? 0.0 : sourceClip->trimStartSeconds);
+        const double trimEndSeconds = item->trimEndSeconds > 0.0
+            ? item->trimEndSeconds
+            : (sourceClip == nullptr ? 0.0 : sourceClip->trimEndSeconds);
+        const double fadeInSeconds = item->fadeInSeconds > 0.0
+            ? item->fadeInSeconds
+            : (sourceClip == nullptr ? 0.0 : sourceClip->fadeInSeconds);
+        const double fadeOutSeconds = item->fadeOutSeconds > 0.0
+            ? item->fadeOutSeconds
+            : (sourceClip == nullptr ? 0.0 : sourceClip->fadeOutSeconds);
 
         for (std::uint32_t frame = 0; frame < destination.frameCount; ++frame)
         {
@@ -3091,38 +4732,254 @@ void AudioEngine::renderTrackClips(std::uint32_t trackId, const RenderContext& r
                 continue;
             }
 
-            double sampleValue = 0.0;
+            const double localTimeSeconds = static_cast<double>(projectSample - clipStartSample) / sampleRate;
+            const double fadeGain = computeFadeGain(
+                localTimeSeconds,
+                item->durationSeconds,
+                fadeInSeconds,
+                fadeOutSeconds);
+            const double totalPan = std::clamp(trackPan + channelPan + item->pan, -1.0, 1.0);
+            const auto [leftPan, rightPan] = stereoPanGains(totalPan);
+            const double totalGain =
+                std::clamp(item->gain, 0.0, 4.0) *
+                std::clamp(trackGainAutomation, 0.0, 2.0) *
+                std::clamp(channelGain, 0.0, 2.0) *
+                fadeGain;
+            double leftSample = 0.0;
+            double rightSample = 0.0;
 
-            if (clipIt->sourceType == ClipSourceType::GeneratedTone)
+            if (item->type == PlaylistItemType::PatternClip)
             {
-                const double localTime = static_cast<double>(projectSample - clipStartSample) / sampleRate;
-                sampleValue = std::sin(kTwoPi * 110.0 * localTime) * clipIt->gain;
-            }
-            else
-            {
-                std::lock_guard<std::mutex> cacheLock(clipCacheMutex_);
-                const auto cacheIt = std::find_if(
-                    clipCache_.begin(),
-                    clipCache_.end(),
-                    [&](const ClipCacheEntry& entry)
-                    {
-                        return entry.clipId == clipIt->clipId && entry.complete;
-                    });
+                const int patternNumber = item->patternNumber != 0
+                    ? item->patternNumber
+                    : (sourceClip == nullptr ? 1 : sourceClip->patternNumber);
+                const PatternState* pattern = findPatternState(patternNumber);
+                const PatternLaneState* patternLane =
+                    pattern == nullptr ? nullptr : findPatternLane(*pattern, trackId);
 
-                if (cacheIt != clipCache_.end())
+                if (patternLane != nullptr)
                 {
-                    const std::size_t clipSampleIndex = static_cast<std::size_t>(projectSample - clipStartSample);
-                    if (clipSampleIndex < cacheIt->left.size() && clipSampleIndex < cacheIt->right.size())
+                    const double secondsPerBeat = 60.0 / std::max(1.0, transportInfo_.tempoBpm);
+                    const double patternDurationSeconds =
+                        static_cast<double>(std::max(1, pattern->lengthInBars)) * 4.0 * secondsPerBeat;
+                    double patternPlaybackSeconds = localTimeSeconds;
+
+                    if (item->timeStretchEnabled && item->durationSeconds > 0.0 && patternDurationSeconds > 0.0)
                     {
-                        destination.left[frame] += cacheIt->left[clipSampleIndex] * clipIt->gain;
-                        destination.right[frame] += cacheIt->right[clipSampleIndex] * clipIt->gain;
+                        patternPlaybackSeconds =
+                            (localTimeSeconds / item->durationSeconds) *
+                            patternDurationSeconds *
+                            std::max(0.125, item->stretchRatio);
+                    }
+
+                    if (!item->timeStretchEnabled)
+                    {
+                        patternPlaybackSeconds = localTimeSeconds * std::max(0.125, item->stretchRatio);
+                    }
+
+                    if (item->loopEnabled && patternDurationSeconds > 0.0)
+                    {
+                        patternPlaybackSeconds = std::fmod(patternPlaybackSeconds, patternDurationSeconds);
+                        if (patternPlaybackSeconds < 0.0)
+                        {
+                            patternPlaybackSeconds += patternDurationSeconds;
+                        }
+                    }
+
+                    const double cellDurationSeconds =
+                        patternDurationSeconds / static_cast<double>(std::max(1, kDefaultPlaylistCellCount));
+
+                    auto renderVoice =
+                        [&](int laneIndex, int stepIndex, int lengthCells, int velocity, bool accent, bool slide)
+                    {
+                        const double noteStartSeconds = static_cast<double>(std::max(0, stepIndex)) * cellDurationSeconds;
+                        const double noteBodyDurationSeconds =
+                            static_cast<double>(std::max(1, lengthCells)) * cellDurationSeconds;
+                        const double noteEndSeconds =
+                            noteStartSeconds +
+                            noteBodyDurationSeconds +
+                            std::max(0.0, settings.releaseMs / 1000.0);
+
+                        if (patternPlaybackSeconds < noteStartSeconds || patternPlaybackSeconds >= noteEndSeconds)
+                        {
+                            return;
+                        }
+
+                        const double noteElapsedSeconds = patternPlaybackSeconds - noteStartSeconds;
+                        const double envelopeGain =
+                            computeEnvelopeGain(noteElapsedSeconds, noteBodyDurationSeconds, settings);
+                        if (envelopeGain <= 0.0)
+                        {
+                            return;
+                        }
+
+                        const double velocityGain =
+                            std::clamp(static_cast<double>(velocity) / 127.0, 0.05, 1.0);
+                        const double accentGain = accent ? 1.12 : 1.0;
+                        const double pitchSemitones =
+                            settings.pitchSemitones +
+                            item->pitchSemitones +
+                            (sourceClip == nullptr ? 0.0 : sourceClip->pitchSemitones);
+                        const double midiNote =
+                            static_cast<double>(36 + std::clamp(laneIndex, 0, kDefaultPianoLaneCount - 1)) +
+                            pitchSemitones;
+                        const double frequency =
+                            440.0 * std::pow(2.0, (midiNote - 69.0) / 12.0);
+                        const double cutoffNorm = std::clamp(cutoffHz / 16000.0, 0.08, 1.0);
+
+                        double voiceLeft = 0.0;
+                        double voiceRight = 0.0;
+                        bool renderedFromSamplerSource = false;
+
+                        if (settings.generatorType == GeneratorType::Sampler && !settings.sampleFilePath.empty())
+                        {
+                            const std::shared_ptr<const DecodedWavData> samplerData =
+                                getSamplerSourceData(settings.sampleFilePath);
+                            if (samplerData != nullptr && !samplerData->left.empty())
+                            {
+                                const double pitchRatio = std::pow(2.0, ((midiNote - 60.0) / 12.0));
+                                double sampleIndex =
+                                    noteElapsedSeconds *
+                                    static_cast<double>(samplerData->sampleRate) *
+                                    pitchRatio;
+                                if (settings.reverse)
+                                {
+                                    sampleIndex = static_cast<double>(samplerData->left.size() - 1) - sampleIndex;
+                                }
+                                voiceLeft = linearSampleAt(samplerData->left, sampleIndex);
+                                voiceRight = linearSampleAt(samplerData->right, sampleIndex);
+                                renderedFromSamplerSource = true;
+                            }
+                        }
+
+                        if (!renderedFromSamplerSource)
+                        {
+                            const double phase = kTwoPi * frequency * noteElapsedSeconds;
+
+                            if (settings.generatorType == GeneratorType::Sampler)
+                            {
+                                const double transient = std::exp(-noteElapsedSeconds * 10.0);
+                                const double body = std::sin(phase) * 0.68;
+                                const double overtone = std::sin(phase * 2.0) * 0.18 * cutoffNorm;
+                                const double low = std::sin(phase * 0.5) * 0.14;
+                                const double wave = (body + overtone + low) * transient;
+                                voiceLeft = wave;
+                                voiceRight = wave;
+                            }
+                            else if (settings.generatorType == GeneratorType::PluginInstrument)
+                            {
+                                const double wave =
+                                    (0.42 * std::sin(phase)) +
+                                    (0.28 * std::asin(std::sin(phase * 1.01))) * cutoffNorm +
+                                    (0.20 * std::sin(phase * 2.0)) +
+                                    (slide ? 0.08 * std::sin(phase * 0.5) : 0.0);
+                                voiceLeft = wave;
+                                voiceRight = wave * (0.96 + (0.04 * cutoffNorm));
+                            }
+                            else
+                            {
+                                const double wave =
+                                    (0.54 * std::sin(phase)) +
+                                    (0.24 * std::sin(phase * 2.0) * cutoffNorm) +
+                                    (0.14 * std::sin(phase * 3.0) * settings.resonance) +
+                                    (0.12 * std::sin(phase * 0.5)) +
+                                    (slide ? 0.05 * std::sin(phase * 1.5) : 0.0);
+                                voiceLeft = wave;
+                                voiceRight = wave;
+                            }
+                        }
+
+                        const double voiceGain = envelopeGain * velocityGain * accentGain * 0.75;
+                        leftSample += voiceLeft * voiceGain;
+                        rightSample += voiceRight * voiceGain;
+                    };
+
+                    for (const auto& note : patternLane->notes)
+                    {
+                        renderVoice(
+                            note.lane,
+                            note.step,
+                            note.length,
+                            note.velocity,
+                            note.accent,
+                            note.slide);
+                    }
+
+                    for (std::size_t stepIndex = 0; stepIndex < patternLane->steps.size(); ++stepIndex)
+                    {
+                        const StepState& step = patternLane->steps[stepIndex];
+                        if (!step.enabled)
+                        {
+                            continue;
+                        }
+
+                        const int rootLane = 8 + static_cast<int>((trackId + patternNumber) % 10);
+                        renderVoice(
+                            rootLane,
+                            static_cast<int>(stepIndex),
+                            1,
+                            std::max(1, step.velocity),
+                            step.velocity >= 112,
+                            false);
+                    }
+                }
+                else
+                {
+                    const double phase = kTwoPi * 110.0 * localTimeSeconds;
+                    leftSample = std::sin(phase) * 0.35;
+                    rightSample = leftSample;
+                }
+            }
+            else if (sourceClip != nullptr && sourceClip->sourceType == ClipSourceType::AudioFile)
+            {
+                const std::shared_ptr<const DecodedWavData> audioData = getSamplerSourceData(sourceClip->filePath);
+                if (audioData != nullptr && !audioData->left.empty())
+                {
+                    const double rawSourceDurationSeconds =
+                        static_cast<double>(audioData->left.size()) /
+                        static_cast<double>(std::max(1u, audioData->sampleRate));
+                    const double sourcePlayableDurationSeconds =
+                        std::max(0.001, rawSourceDurationSeconds - trimStartSeconds - trimEndSeconds);
+                    double sourcePlaybackSeconds = localTimeSeconds;
+
+                    if (item->timeStretchEnabled && item->durationSeconds > 0.0)
+                    {
+                        sourcePlaybackSeconds =
+                            (localTimeSeconds / item->durationSeconds) *
+                            sourcePlayableDurationSeconds;
+                    }
+                    else
+                    {
+                        sourcePlaybackSeconds = localTimeSeconds * std::max(0.125, item->stretchRatio);
+                    }
+
+                    const double pitchRatio = std::pow(2.0, item->pitchSemitones / 12.0);
+                    sourcePlaybackSeconds *= std::max(0.125, pitchRatio);
+
+                    if (!item->loopEnabled && sourcePlaybackSeconds >= sourcePlayableDurationSeconds)
+                    {
                         continue;
                     }
+
+                    if (item->loopEnabled && sourcePlayableDurationSeconds > 0.0)
+                    {
+                        sourcePlaybackSeconds = std::fmod(sourcePlaybackSeconds, sourcePlayableDurationSeconds);
+                        if (sourcePlaybackSeconds < 0.0)
+                        {
+                            sourcePlaybackSeconds += sourcePlayableDurationSeconds;
+                        }
+                    }
+
+                    const double sourceSampleIndex =
+                        (trimStartSeconds + sourcePlaybackSeconds) *
+                        static_cast<double>(audioData->sampleRate);
+                    leftSample = linearSampleAt(audioData->left, sourceSampleIndex);
+                    rightSample = linearSampleAt(audioData->right, sourceSampleIndex);
                 }
             }
 
-            destination.left[frame] += sampleValue;
-            destination.right[frame] += sampleValue;
+            destination.left[frame] += leftSample * leftPan * totalGain;
+            destination.right[frame] += rightSample * rightPan * totalGain;
         }
     }
 }
@@ -3194,15 +5051,21 @@ void AudioEngine::queueClipReadAhead(const RenderContext& renderContext)
         (static_cast<double>(renderContext.callback.blockSize * std::max(1, config_.anticipativePrefetchBlocks)) /
          static_cast<double>(std::max(1u, renderContext.callback.sampleRate)));
 
-    for (const auto& clip : projectState_.clips)
+    for (const auto& item : projectState_.playlistItems)
     {
-        if (clip.sourceType != ClipSourceType::AudioFile || clip.filePath.empty())
+        if (item.type != PlaylistItemType::AudioClip || item.sourceClipId == 0)
         {
             continue;
         }
 
-        if (clip.startTimeSeconds > lookAheadSeconds ||
-            (clip.startTimeSeconds + clip.durationSeconds) < blockStartSeconds)
+        const ClipState* clip = findClipState(item.sourceClipId);
+        if (clip == nullptr || clip->sourceType != ClipSourceType::AudioFile || clip->filePath.empty())
+        {
+            continue;
+        }
+
+        if (item.startTimeSeconds > lookAheadSeconds ||
+            (item.startTimeSeconds + item.durationSeconds) < blockStartSeconds)
         {
             continue;
         }
@@ -3215,7 +5078,7 @@ void AudioEngine::queueClipReadAhead(const RenderContext& renderContext)
                 clipCache_.end(),
                 [&](const ClipCacheEntry& entry)
                 {
-                    return entry.clipId == clip.clipId && entry.complete;
+                    return entry.clipId == clip->clipId && entry.complete;
                 });
         }
 
@@ -3231,16 +5094,16 @@ void AudioEngine::queueClipReadAhead(const RenderContext& renderContext)
                 diskReadQueue_.end(),
                 [&](const DiskReadRequest& request)
                 {
-                    return request.clipId == clip.clipId;
+                    return request.clipId == clip->clipId;
                 });
 
             if (!alreadyQueued)
             {
                 diskReadQueue_.push_back(DiskReadRequest{
-                    clip.clipId,
-                    clip.filePath,
+                    clip->clipId,
+                    clip->filePath,
                     0,
-                    static_cast<std::uint32_t>(clip.durationSeconds * static_cast<double>(renderContext.callback.sampleRate))});
+                    static_cast<std::uint32_t>(item.durationSeconds * static_cast<double>(renderContext.callback.sampleRate))});
             }
         }
 
@@ -3597,6 +5460,20 @@ std::uint32_t AudioEngine::nextClipId() const
     return maxId + 1;
 }
 
+std::uint32_t AudioEngine::nextPlaylistItemId() const
+{
+    std::uint32_t maxId = 0;
+    for (const auto& item : projectState_.playlistItems)
+    {
+        if (item.type == PlaylistItemType::AutomationClip || item.itemId >= 4000)
+        {
+            continue;
+        }
+        maxId = std::max(maxId, item.itemId);
+    }
+    return std::max<std::uint32_t>(1, maxId + 1);
+}
+
 std::uint32_t AudioEngine::nextPluginInstanceId() const
 {
     std::uint32_t maxId = 0;
@@ -3604,6 +5481,16 @@ std::uint32_t AudioEngine::nextPluginInstanceId() const
     for (const auto& plugin : loadedPlugins_)
     {
         maxId = std::max(maxId, plugin.instanceId);
+    }
+    return maxId + 1;
+}
+
+std::uint32_t AudioEngine::nextAutomationClipId() const
+{
+    std::uint32_t maxId = 4000;
+    for (const auto& automationClip : projectState_.automationClips)
+    {
+        maxId = std::max(maxId, automationClip.clipId);
     }
     return maxId + 1;
 }
@@ -3706,15 +5593,70 @@ void AudioEngine::processPendingCommands()
             addBus(command.textValue);
             break;
 
+        case CommandType::AddPattern:
+            addPattern(command.textValue);
+            break;
+
         case CommandType::AddClipToTrack:
             addClipToTrack(static_cast<std::uint32_t>(command.uintValue), command.textValue);
             break;
+
+        case CommandType::TogglePatternStep:
+        {
+            const std::vector<std::string> parts = splitString(command.textValue, '|');
+            if (parts.size() >= 3)
+            {
+                togglePatternStep(
+                    std::stoi(parts[0]),
+                    static_cast<std::uint32_t>(std::stoul(parts[1])),
+                    std::stoi(parts[2]));
+            }
+            break;
+        }
+
+        case CommandType::UpsertMidiNote:
+        {
+            const std::vector<std::string> parts = splitString(command.textValue, '|');
+            if (parts.size() >= 10)
+            {
+                MidiNoteState note{};
+                note.lane = std::stoi(parts[3]);
+                note.step = std::stoi(parts[4]);
+                note.length = std::stoi(parts[5]);
+                note.velocity = std::stoi(parts[6]);
+                note.accent = parseBoolToken(parts[7]);
+                note.slide = parseBoolToken(parts[8]);
+                note.selected = false;
+                upsertMidiNote(
+                    std::stoi(parts[0]),
+                    static_cast<std::uint32_t>(std::stoul(parts[1])),
+                    static_cast<std::size_t>(std::stoull(parts[2])),
+                    note,
+                    parseBoolToken(parts[9]));
+            }
+            break;
+        }
+
+        case CommandType::SetAutomationPoint:
+        {
+            const std::vector<std::string> parts = splitString(command.textValue, '|');
+            if (parts.size() >= 4)
+            {
+                setAutomationPoint(
+                    static_cast<std::uint32_t>(std::stoul(parts[0])),
+                    std::stoi(parts[1]),
+                    std::stoi(parts[2]),
+                    std::stoi(parts[3]));
+            }
+            break;
+        }
 
         case CommandType::MoveClip:
             moveClip(
                 static_cast<std::uint32_t>(command.uintValue),
                 static_cast<std::uint32_t>(command.secondaryUintValue),
-                command.doubleValue);
+                command.doubleValue,
+                command.textValue.empty() ? -1.0 : std::strtod(command.textValue.c_str(), nullptr));
             break;
 
         case CommandType::SaveProject:
@@ -3739,4 +5681,3 @@ void AudioEngine::processPendingCommands()
         }
     }
 }
-
