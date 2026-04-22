@@ -104,6 +104,20 @@ public:
         AudioFile
     };
 
+    enum class GeneratorType
+    {
+        Sampler,
+        TestSynth,
+        PluginInstrument
+    };
+
+    enum class PlaylistItemType
+    {
+        PatternClip,
+        AudioClip,
+        AutomationClip
+    };
+
     enum class ParameterSmoothingMode
     {
         Step,
@@ -134,7 +148,11 @@ public:
         FreezeTrack,
         AddTrack,
         AddBus,
+        AddPattern,
         AddClipToTrack,
+        TogglePatternStep,
+        UpsertMidiNote,
+        SetAutomationPoint,
         MoveClip,
         SaveProject,
         LoadProject,
@@ -557,6 +575,8 @@ public:
         std::uint32_t sampleRate = 48000;
         std::string outputPath;
         bool highQuality = true;
+        bool renderStems = false;
+        std::uint32_t targetTrackId = 0;
     };
 
     struct ClipState
@@ -566,10 +586,44 @@ public:
         std::string name;
         ClipSourceType sourceType = ClipSourceType::GeneratedTone;
         std::string filePath;
+        int patternNumber = 0;
         double startTimeSeconds = 0.0;
         double durationSeconds = 1.0;
+        double trimStartSeconds = 0.0;
+        double trimEndSeconds = 0.0;
+        double fadeInSeconds = 0.0;
+        double fadeOutSeconds = 0.0;
         double gain = 1.0;
+        double pan = 0.0;
+        double pitchSemitones = 0.0;
+        double stretchRatio = 1.0;
+        bool loopEnabled = false;
+        bool timeStretchEnabled = false;
         bool muted = false;
+    };
+
+    struct PlaylistItemState
+    {
+        std::uint32_t itemId = 0;
+        std::uint32_t trackId = 0;
+        PlaylistItemType type = PlaylistItemType::PatternClip;
+        std::uint32_t sourceClipId = 0;
+        std::uint32_t automationClipId = 0;
+        int patternNumber = 0;
+        std::string label;
+        double startTimeSeconds = 0.0;
+        double durationSeconds = 1.0;
+        double trimStartSeconds = 0.0;
+        double trimEndSeconds = 0.0;
+        double fadeInSeconds = 0.0;
+        double fadeOutSeconds = 0.0;
+        double gain = 1.0;
+        double pan = 0.0;
+        double pitchSemitones = 0.0;
+        double stretchRatio = 1.0;
+        bool muted = false;
+        bool loopEnabled = false;
+        bool timeStretchEnabled = false;
     };
 
     struct TrackState
@@ -580,6 +634,12 @@ public:
         bool armed = false;
         bool muted = false;
         bool solo = false;
+        bool recordEnabled = false;
+        double gain = 1.0;
+        double pan = 0.0;
+        std::uint32_t routeTargetBusId = 0;
+        std::uint32_t sendBusId = 0;
+        double sendAmount = 0.0;
         std::vector<std::uint32_t> clipIds;
         std::vector<std::uint32_t> insertPluginIds;
     };
@@ -588,6 +648,11 @@ public:
     {
         std::uint32_t busId = 0;
         std::string name;
+        double gain = 1.0;
+        double pan = 0.0;
+        bool muted = false;
+        bool solo = false;
+        std::uint32_t outputBusId = 0;
         std::vector<std::uint32_t> inputTrackIds;
     };
 
@@ -598,6 +663,83 @@ public:
         double timeSeconds = 0.0;
     };
 
+    struct StepState
+    {
+        bool enabled = false;
+        int velocity = 100;
+    };
+
+    struct MidiNoteState
+    {
+        int lane = 0;
+        int step = 0;
+        int length = 2;
+        int velocity = 100;
+        bool accent = false;
+        bool slide = false;
+        bool selected = false;
+    };
+
+    struct PatternLaneState
+    {
+        std::uint32_t trackId = 0;
+        std::vector<StepState> steps;
+        std::vector<MidiNoteState> notes;
+        int swing = 0;
+        int shuffle = 0;
+    };
+
+    struct PatternState
+    {
+        int patternNumber = 1;
+        std::string name;
+        std::vector<PatternLaneState> lanes;
+        int lengthInBars = 2;
+        int accentAmount = 0;
+    };
+
+    struct ChannelSettingsState
+    {
+        std::uint32_t trackId = 0;
+        std::string name;
+        GeneratorType generatorType = GeneratorType::Sampler;
+        std::string sampleFilePath;
+        std::string instrumentPluginName;
+        double gain = 0.8;
+        double pan = 0.0;
+        double pitchSemitones = 0.0;
+        double attackMs = 12.0;
+        double decayMs = 70.0;
+        double sustainLevel = 0.78;
+        double releaseMs = 180.0;
+        double filterCutoffHz = 8400.0;
+        double resonance = 0.2;
+        int mixerInsert = 1;
+        int routeTarget = 0;
+        bool reverse = false;
+        bool timeStretch = true;
+        std::vector<std::string> pluginRack;
+        std::vector<std::string> presets;
+    };
+
+    struct AutomationPointState
+    {
+        int cell = 0;
+        int value = 0;
+        double curve = 0.0;
+    };
+
+    struct AutomationClipState
+    {
+        std::uint32_t clipId = 0;
+        std::string target;
+        std::vector<AutomationPointState> points;
+        std::uint32_t trackId = 0;
+        int lane = 0;
+        int startCell = 0;
+        int lengthCells = 8;
+    };
+
     struct ProjectState
     {
         std::string projectName = "Untitled Project";
@@ -606,8 +748,18 @@ public:
         bool dirty = false;
         std::vector<TrackState> tracks;
         std::vector<ClipState> clips;
+        std::vector<PlaylistItemState> playlistItems;
         std::vector<BusState> buses;
         std::vector<MarkerState> markers;
+        std::vector<PatternState> patterns;
+        std::vector<ChannelSettingsState> channelSettings;
+        std::vector<AutomationClipState> automationClips;
+        bool autosaveEnabled = true;
+        bool recoveryAvailable = false;
+        std::string autosavePath;
+        std::string recoveryPath;
+        std::uint64_t lastSavedRevision = 0;
+        std::uint64_t lastAutosavedRevision = 0;
     };
 
     struct ProjectAction
@@ -734,8 +886,12 @@ public:
 
     bool addTrack(const std::string& name);
     bool addBus(const std::string& name);
+    bool addPattern(const std::string& name);
     bool addClipToTrack(std::uint32_t trackId, const std::string& clipName);
-    bool moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, double startTimeSeconds);
+    bool togglePatternStep(int patternNumber, std::uint32_t trackId, int stepIndex);
+    bool upsertMidiNote(int patternNumber, std::uint32_t trackId, std::size_t noteIndex, const MidiNoteState& note, bool createIfMissing);
+    bool setAutomationPoint(std::uint32_t clipId, int pointIndex, int cell, int value);
+    bool moveClip(std::uint32_t clipId, std::uint32_t targetTrackId, double startTimeSeconds, double durationSeconds = -1.0);
     bool newProject(const std::string& name);
     bool saveProject(const std::string& path);
     bool loadProject(const std::string& path);
@@ -758,6 +914,9 @@ private:
     void processPendingCommands();
 
     bool initializeProjectState();
+    void synchronizeProjectMusicalState();
+    bool writeProjectFile(const std::string& path, bool updateSessionPath, bool clearDirtyState);
+    void maybeAutosaveProject();
     GraphSnapshot buildGraphFromProjectState() const;
     std::optional<GraphNode> findGraphNode(std::uint32_t nodeId, const GraphSnapshot& graph) const;
     const CompiledNode* findCompiledNode(std::uint32_t nodeId) const;
@@ -794,11 +953,33 @@ private:
     void serviceSandboxWatchdogs();
     void serviceClipCacheEviction();
 
+    PatternState* findPatternState(int patternNumber);
+    const PatternState* findPatternState(int patternNumber) const;
+    PatternLaneState* findPatternLane(PatternState& pattern, std::uint32_t trackId);
+    const PatternLaneState* findPatternLane(const PatternState& pattern, std::uint32_t trackId) const;
+    ClipState* findClipState(std::uint32_t clipId);
+    const ClipState* findClipState(std::uint32_t clipId) const;
+    PlaylistItemState* findPlaylistItem(std::uint32_t itemId);
+    const PlaylistItemState* findPlaylistItem(std::uint32_t itemId) const;
+    BusState* findBusState(std::uint32_t busId);
+    const BusState* findBusState(std::uint32_t busId) const;
+    ChannelSettingsState* findChannelSettings(std::uint32_t trackId);
+    const ChannelSettingsState* findChannelSettings(std::uint32_t trackId) const;
+    AutomationClipState* findAutomationClip(std::uint32_t clipId);
+    double evaluateAutomationTarget(const std::string& target, double timelineSeconds, double defaultValue) const;
+    bool hasSoloedTracks() const;
+    bool hasSoloedBuses() const;
+    PatternLaneState makeDefaultPatternLane(std::uint32_t trackId, int patternNumber, std::size_t laneIndex) const;
+    PatternState makeDefaultPatternState(int patternNumber) const;
+    ChannelSettingsState makeDefaultChannelSettings(std::uint32_t trackId, std::size_t laneIndex) const;
+
     void pushUndoState(const std::string& description, const ProjectState& beforeState);
     std::uint32_t nextTrackId() const;
     std::uint32_t nextBusId() const;
     std::uint32_t nextClipId() const;
+    std::uint32_t nextPlaylistItemId() const;
     std::uint32_t nextPluginInstanceId() const;
+    std::uint32_t nextAutomationClipId() const;
 
 private:
     EngineConfig config_{};
