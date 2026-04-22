@@ -1868,9 +1868,25 @@ void AudioEngine::processPendingCommands()
             addPattern(command.textValue);
             break;
 
-        case CommandType::AddClipToTrack:
-            addClipToTrack(static_cast<std::uint32_t>(command.uintValue), command.textValue);
+        case CommandType::ClonePattern:
+            clonePattern(static_cast<int>(command.uintValue));
             break;
+
+        case CommandType::DeletePattern:
+            deletePattern(static_cast<int>(command.uintValue));
+            break;
+
+        case CommandType::AddClipToTrack:
+        {
+            const double requestedDuration =
+                command.secondaryTextValue.empty() ? -1.0 : std::stod(command.secondaryTextValue);
+            addClipToTrack(
+                static_cast<std::uint32_t>(command.uintValue),
+                command.textValue,
+                command.doubleValue,
+                requestedDuration);
+            break;
+        }
 
         case CommandType::TogglePatternStep:
         {
@@ -1952,3 +1968,4 @@ void AudioEngine::processPendingCommands()
         }
     }
 }
+
