@@ -156,18 +156,11 @@ void UI::clampPlaylistScroll()
 
     RECT clientRect{};
     GetClientRect(playlistPanel_, &clientRect);
-    const int leftInset = kPlaylistTrackHeaderWidth;
-    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
-    const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
-    const int visibleGridHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - timelineHeight);
-    const int contentWidth = playlistTotalCellCount() * playlistColumnWidth(visibleGridWidth);
-    const int viewportTrackCount = std::max(1, (visibleGridHeight + kPlaylistLaneHeight - 1) / kPlaylistLaneHeight);
-    const int contentHeight =
-        std::max(
-            playlistTrackLaneCount() + 8,
-            std::max(kPlaylistMinVisibleTracks, viewportTrackCount)) * kPlaylistLaneHeight;
-    const int maxScrollX = std::max(0, contentWidth - visibleGridWidth);
-    const int maxScrollY = std::max(0, contentHeight - visibleGridHeight);
+    const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+    const int contentWidth = playlistTotalCellCount() * playlistColumnWidth(metrics.visibleGridWidth);
+    const int contentHeight = playlistContentHeightForViewport(playlistTrackLaneCount(), metrics.visibleGridHeight);
+    const int maxScrollX = std::max(0, contentWidth - metrics.visibleGridWidth);
+    const int maxScrollY = std::max(0, contentHeight - metrics.visibleGridHeight);
     playlistScrollX_ = clampValue(playlistScrollX_, 0, maxScrollX);
     playlistScrollY_ = clampValue(playlistScrollY_, 0, maxScrollY);
 }
@@ -204,37 +197,7 @@ void UI::updatePlaylistScrollBars()
     }
 
     clampPlaylistScroll();
-
-    RECT clientRect{};
-    GetClientRect(playlistPanel_, &clientRect);
-    const int leftInset = kPlaylistTrackHeaderWidth;
-    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
-    const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
-    const int visibleGridHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - timelineHeight);
-    const int contentWidth = std::max(visibleGridWidth, playlistTotalCellCount() * playlistColumnWidth(visibleGridWidth));
-    const int viewportTrackCount = std::max(1, (visibleGridHeight + kPlaylistLaneHeight - 1) / kPlaylistLaneHeight);
-    const int contentHeight =
-        std::max(
-            playlistTrackLaneCount() + 8,
-            std::max(kPlaylistMinVisibleTracks, viewportTrackCount)) * kPlaylistLaneHeight;
-
-    SCROLLINFO horizontalInfo{};
-    horizontalInfo.cbSize = sizeof(horizontalInfo);
-    horizontalInfo.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
-    horizontalInfo.nMin = 0;
-    horizontalInfo.nMax = std::max(0, contentWidth - 1);
-    horizontalInfo.nPage = static_cast<UINT>(visibleGridWidth);
-    horizontalInfo.nPos = playlistScrollX_;
-    SetScrollInfo(playlistPanel_, SB_HORZ, &horizontalInfo, TRUE);
-
-    SCROLLINFO verticalInfo{};
-    verticalInfo.cbSize = sizeof(verticalInfo);
-    verticalInfo.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
-    verticalInfo.nMin = 0;
-    verticalInfo.nMax = std::max(0, contentHeight - 1);
-    verticalInfo.nPage = static_cast<UINT>(visibleGridHeight);
-    verticalInfo.nPos = playlistScrollY_;
-    SetScrollInfo(playlistPanel_, SB_VERT, &verticalInfo, TRUE);
+    ShowScrollBar(playlistPanel_, SB_BOTH, FALSE);
 }
 
 void UI::scrollBrowserTo(int y)
@@ -255,13 +218,11 @@ void UI::scrollPlaylistTo(int x, int y)
 void UI::rebuildPlaylistVisuals(const RECT& rect)
 {
     interactionState_.playlistClipVisuals.clear();
-    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+    const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(rect);
     const int laneHeight = kPlaylistLaneHeight;
-    const int leftInset = kPlaylistTrackHeaderWidth;
-    const int clientWidth = static_cast<int>(rect.right - rect.left);
-    const int columnWidth = playlistColumnWidth(std::max(1, clientWidth - leftInset));
-    const int clipTopBase = rect.top + timelineHeight + 6 - playlistScrollY_;
-    const int clipLeftBase = rect.left + leftInset - playlistScrollX_;
+    const int columnWidth = playlistColumnWidth(metrics.visibleGridWidth);
+    const int clipTopBase = metrics.gridRect.top + 6 - playlistScrollY_;
+    const int clipLeftBase = metrics.gridRect.left - playlistScrollX_;
 
     for (const auto& block : workspaceModel_.playlistBlocks)
     {
@@ -279,10 +240,10 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
         visual.resizeLeftHot = false;
         visual.resizeRightHot = false;
 
-        if (visual.rect.x + visual.rect.width < rect.left + leftInset ||
-            visual.rect.x > rect.right ||
-            visual.rect.y + visual.rect.height < rect.top + timelineHeight ||
-            visual.rect.y > rect.bottom)
+        if (visual.rect.x + visual.rect.width < metrics.gridRect.left ||
+            visual.rect.x > metrics.gridRect.right ||
+            visual.rect.y + visual.rect.height < metrics.gridRect.top ||
+            visual.rect.y > metrics.gridRect.bottom)
         {
             continue;
         }
@@ -884,7 +845,7 @@ void UI::paintMainBackground(HDC dc) const
     const int displayHeight = 50;
     const int transportX = timePanelX + timePanelWidth + 18;
     const int transportY = topPanelY + 18;
-    const int patternClusterWidth = 484;
+    const int patternClusterWidth = 392;
     const int clientRight = static_cast<int>(clientRect.right);
     const int patternClusterLimit = std::max(kOuterPadding, clientRight - kOuterPadding - patternClusterWidth);
     const int patternClusterDesired = std::max(transportX + 344, clientRight - patternClusterWidth - 28);
@@ -1113,7 +1074,6 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
     static HFONT smallBoldFont = CreateFontA(12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     static HFONT lcdFont = CreateFontA(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     static HFONT lcdFineFont = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
-    static HFONT chronoFont = CreateFontA(11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
     HGDIOBJ oldFont = nullptr;
 
     if (isMenuStripButton)
@@ -1130,21 +1090,34 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
     if (isModeButton)
     {
         fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
+        const bool songButton = controlId == IdButtonSongMode;
+        const COLORREF activeFill =
+            songButton
+                ? blendColor(kFlSongGreen, RGB(225, 249, 189), pressed ? 3 : 2, 6)
+                : blendColor(kFlOrangeDeep, RGB(255, 190, 110), pressed ? 3 : 2, 6);
         const COLORREF fillColor =
             active
-                ? blendColor(kFlOrangeDeep, RGB(255, 190, 110), pressed ? 3 : 2, 6)
+                ? activeFill
                 : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark);
+        const COLORREF borderColor =
+            active
+                ? (songButton ? RGB(118, 162, 70) : RGB(188, 118, 56))
+                : kFlPanelDarker;
         HBRUSH brush = CreateSolidBrush(fillColor);
-        HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(188, 118, 56) : kFlPanelDarker);
+        HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
         HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
         HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
-        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 16, 16);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
         SelectObject(drawItem.hDC, oldPen);
         SelectObject(drawItem.hDC, oldBrush);
         DeleteObject(pen);
         DeleteObject(brush);
         oldFont = SelectObject(drawItem.hDC, smallBoldFont);
-        SetTextColor(drawItem.hDC, active ? RGB(66, 46, 27) : RGB(225, 232, 235));
+        SetTextColor(
+            drawItem.hDC,
+            active
+                ? (songButton ? RGB(50, 73, 31) : RGB(66, 46, 27))
+                : RGB(225, 232, 235));
         DrawTextA(drawItem.hDC, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(drawItem.hDC, oldFont);
         return true;
@@ -1212,15 +1185,14 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         DeleteObject(pen);
         DeleteObject(brush);
 
-        RECT clockFace{rect.left + 10, rect.top + 8, rect.left + 24, rect.top + 22};
+        RECT clockFace{
+            rect.left + ((rect.right - rect.left - 14) / 2),
+            rect.top + ((rect.bottom - rect.top - 14) / 2),
+            rect.left + ((rect.right - rect.left - 14) / 2) + 14,
+            rect.top + ((rect.bottom - rect.top - 14) / 2) + 14};
         drawFilledCircle(drawItem.hDC, clockFace, RGB(248, 236, 219), RGB(142, 88, 39));
         drawVerticalLine(drawItem.hDC, clockFace.left + 7, clockFace.top + 3, clockFace.top + 9, RGB(112, 73, 38));
         drawHorizontalLine(drawItem.hDC, clockFace.left + 7, clockFace.left + 11, clockFace.top + 9, RGB(112, 73, 38));
-        oldFont = SelectObject(drawItem.hDC, chronoFont);
-        SetTextColor(drawItem.hDC, RGB(88, 57, 30));
-        RECT textRect{rect.left + 3, rect.bottom - 14, rect.right - 3, rect.bottom - 2};
-        DrawTextA(drawItem.hDC, "CLK", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(drawItem.hDC, oldFont);
         return true;
     }
 
@@ -1246,36 +1218,20 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
             fineTempo -= 1000;
         }
 
-        RECT baseRect{rect.left + 10, rect.top + 3, rect.right - 38, rect.bottom - 3};
-        RECT fineRect{rect.right - 46, rect.top + 8, rect.right - 16, rect.bottom - 6};
-        RECT arrowRect{rect.right - 16, rect.top + 2, rect.right - 4, rect.bottom - 2};
-        drawVerticalLine(drawItem.hDC, rect.right - 18, rect.top + 5, rect.bottom - 5, RGB(190, 199, 202));
-        drawVerticalLine(drawItem.hDC, rect.right - 48, rect.top + 6, rect.bottom - 6, RGB(196, 206, 209));
+        RECT baseRect{rect.left + 8, rect.top + 3, rect.left + 48, rect.bottom - 3};
+        RECT fineRect{rect.left + 46, rect.top + 8, rect.right - 8, rect.bottom - 6};
+        drawVerticalLine(drawItem.hDC, rect.left + 46, rect.top + 6, rect.bottom - 6, RGB(196, 206, 209));
 
         HGDIOBJ oldLcdFont = SelectObject(drawItem.hDC, lcdFont);
         SetTextColor(drawItem.hDC, kFlLcdText);
         const std::string baseText = std::to_string(baseTempo);
-        DrawTextA(drawItem.hDC, baseText.c_str(), -1, &baseRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextA(drawItem.hDC, baseText.c_str(), -1, &baseRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         SelectObject(drawItem.hDC, lcdFineFont);
         char fineBuffer[8]{};
         std::snprintf(fineBuffer, sizeof(fineBuffer), ".%03d", fineTempo);
         SetTextColor(drawItem.hDC, tempoDragFineAdjust_ ? kFlOrangeDeep : RGB(90, 101, 105));
         DrawTextA(drawItem.hDC, fineBuffer, -1, &fineRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-        POINT arrow[3]{
-            POINT{arrowRect.left + 2, arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) - 2},
-            POINT{arrowRect.right - 2, arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) - 2},
-            POINT{arrowRect.left + ((arrowRect.right - arrowRect.left) / 2), arrowRect.top + ((arrowRect.bottom - arrowRect.top) / 2) + 2}};
-        HBRUSH arrowBrush = CreateSolidBrush(RGB(127, 136, 140));
-        HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(127, 136, 140));
-        HGDIOBJ oldArrowBrush = SelectObject(drawItem.hDC, arrowBrush);
-        HGDIOBJ oldArrowPen = SelectObject(drawItem.hDC, arrowPen);
-        Polygon(drawItem.hDC, arrow, 3);
-        SelectObject(drawItem.hDC, oldArrowPen);
-        SelectObject(drawItem.hDC, oldArrowBrush);
-        DeleteObject(arrowPen);
-        DeleteObject(arrowBrush);
         SelectObject(drawItem.hDC, oldLcdFont);
         return true;
     }
@@ -1291,18 +1247,33 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         const COLORREF fillColor =
             controlId == IdButtonPatternPrev
-                ? (pressed ? blendColor(kFlOrangeDeep, RGB(248, 186, 108), 1, 2) : blendColor(kFlOrangeDeep, RGB(255, 199, 130), 1, 4))
+                ? (patternPopupOpen_
+                    ? blendColor(kFlOrangeDeep, RGB(255, 199, 130), 1, 4)
+                    : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark))
                 : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark);
         fillRectColor(drawItem.hDC, rect, fillColor);
-        drawSurfaceFrame(drawItem.hDC, rect, controlId == IdButtonPatternPrev ? RGB(160, 96, 42) : kFlPanelDarker);
+        drawSurfaceFrame(
+            drawItem.hDC,
+            rect,
+            controlId == IdButtonPatternPrev && patternPopupOpen_ ? RGB(160, 96, 42) : kFlPanelDarker);
         if (controlId == IdButtonPatternPrev)
         {
-            POINT arrow[3]{
-                POINT{rect.left + 7, rect.top + 12},
-                POINT{rect.left + 17, rect.top + 12},
-                POINT{rect.left + 12, rect.bottom - 10}};
-            HBRUSH arrowBrush = CreateSolidBrush(RGB(95, 51, 15));
-            HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(95, 51, 15));
+            POINT arrow[3]{};
+            if (patternPopupOpen_)
+            {
+                arrow[0] = POINT{rect.left + 7, rect.top + 12};
+                arrow[1] = POINT{rect.left + 17, rect.top + 12};
+                arrow[2] = POINT{rect.left + 12, rect.bottom - 10};
+            }
+            else
+            {
+                arrow[0] = POINT{rect.left + 8, rect.top + 8};
+                arrow[1] = POINT{rect.left + 8, rect.bottom - 8};
+                arrow[2] = POINT{rect.right - 7, rect.top + ((rect.bottom - rect.top) / 2)};
+            }
+            const COLORREF arrowColor = patternPopupOpen_ ? RGB(95, 51, 15) : RGB(225, 232, 235);
+            HBRUSH arrowBrush = CreateSolidBrush(arrowColor);
+            HPEN arrowPen = CreatePen(PS_SOLID, 1, arrowColor);
             HGDIOBJ oldArrowBrush = SelectObject(drawItem.hDC, arrowBrush);
             HGDIOBJ oldArrowPen = SelectObject(drawItem.hDC, arrowPen);
             Polygon(drawItem.hDC, arrow, 3);
@@ -1343,7 +1314,7 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         HPEN pen = CreatePen(PS_SOLID, 1, active ? blendColor(kUiLime, kUiLine, 1, 3) : kFlPanelDarker);
         HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
         HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
-        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
         SelectObject(drawItem.hDC, oldPen);
         SelectObject(drawItem.hDC, oldBrush);
         DeleteObject(pen);
