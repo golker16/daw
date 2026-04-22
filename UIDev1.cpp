@@ -34,10 +34,13 @@ namespace
     constexpr COLORREF kFlPanelHighlight = RGB(107, 117, 121);
     constexpr COLORREF kFlOrange = RGB(240, 162, 75);
     constexpr COLORREF kFlOrangeDeep = RGB(213, 131, 57);
+    constexpr COLORREF kFlSongGreen = RGB(191, 239, 121);
     constexpr COLORREF kFlLcdFill = RGB(211, 222, 226);
     constexpr COLORREF kFlLcdBorder = RGB(184, 195, 199);
     constexpr COLORREF kFlLcdText = RGB(75, 84, 89);
     constexpr COLORREF kFlClockPassive = RGB(77, 85, 89);
+    constexpr COLORREF kPlaylistScrollTrack = RGB(53, 62, 67);
+    constexpr COLORREF kPlaylistScrollThumb = RGB(79, 93, 100);
 
     constexpr int kOuterPadding = 12;
     constexpr int kGap = 8;
@@ -60,12 +63,16 @@ namespace
     constexpr int kPlaylistLaneHeight = 36;
     constexpr int kPlaylistTimelineHeight = 28;
     constexpr int kPlaylistTrackHeaderWidth = 138;
+    constexpr int kPlaylistScrollThickness = 8;
     constexpr int kToolbarGlyphSize = 13;
     constexpr int kTempoDisplayWidth = 108;
     constexpr int kTempoDisplayHeight = 38;
     constexpr int kChronometerWidth = 42;
     constexpr int kChronometerHeight = 38;
     constexpr int kChronometerGap = 8;
+    constexpr int kPlaylistToolButtonWidth = 48;
+    constexpr int kPlaylistToolButtonHeight = 18;
+    constexpr int kPlaylistToolButtonGap = 4;
     constexpr int kPlaylistMinVisibleTracks = 12;
 
     constexpr const char* kBrowserTabs[kBrowserTabCount] = {
@@ -76,6 +83,109 @@ namespace
     constexpr const char* kNoteNames[12] = {
         "C", "C#", "D", "D#", "E", "F",
         "F#", "G", "G#", "A", "A#", "B"};
+
+    struct PlaylistLayoutMetrics
+    {
+        RECT headerRect{};
+        RECT viewportRect{};
+        RECT trackHeaderRect{};
+        RECT timelineRect{};
+        RECT gutterRect{};
+        RECT gridRect{};
+        RECT horizontalScrollRect{};
+        RECT verticalScrollRect{};
+        RECT scrollCornerRect{};
+        int visibleGridWidth = 1;
+        int visibleGridHeight = 1;
+    };
+
+    int rectWidth(const RECT& rect)
+    {
+        return std::max(0, static_cast<int>(rect.right - rect.left));
+    }
+
+    int rectHeight(const RECT& rect)
+    {
+        return std::max(0, static_cast<int>(rect.bottom - rect.top));
+    }
+
+    PlaylistLayoutMetrics makePlaylistLayoutMetrics(const RECT& rect)
+    {
+        PlaylistLayoutMetrics metrics{};
+        const int viewportRight = std::max(rect.left + 1, rect.right - kPlaylistScrollThickness);
+        const int viewportBottom = std::max(rect.top + 1, rect.bottom - kPlaylistScrollThickness);
+
+        metrics.headerRect = RECT{rect.left, rect.top, viewportRight, rect.top + kSurfaceHeaderHeight};
+        metrics.viewportRect = RECT{rect.left, rect.top, viewportRight, viewportBottom};
+        metrics.trackHeaderRect = RECT{
+            rect.left,
+            metrics.headerRect.bottom + kPlaylistTimelineHeight,
+            rect.left + kPlaylistTrackHeaderWidth,
+            viewportBottom};
+        metrics.timelineRect = RECT{
+            rect.left + kPlaylistTrackHeaderWidth,
+            metrics.headerRect.bottom,
+            viewportRight,
+            metrics.headerRect.bottom + kPlaylistTimelineHeight};
+        metrics.gutterRect = RECT{
+            rect.left,
+            metrics.headerRect.bottom,
+            rect.left + kPlaylistTrackHeaderWidth,
+            metrics.headerRect.bottom + kPlaylistTimelineHeight};
+        metrics.gridRect = RECT{
+            rect.left + kPlaylistTrackHeaderWidth,
+            metrics.timelineRect.bottom,
+            viewportRight,
+            viewportBottom};
+        metrics.horizontalScrollRect = RECT{rect.left, viewportBottom, viewportRight, rect.bottom};
+        metrics.verticalScrollRect = RECT{viewportRight, rect.top, rect.right, viewportBottom};
+        metrics.scrollCornerRect = RECT{viewportRight, viewportBottom, rect.right, rect.bottom};
+        metrics.visibleGridWidth = std::max(1, rectWidth(metrics.gridRect));
+        metrics.visibleGridHeight = std::max(1, rectHeight(metrics.gridRect));
+        return metrics;
+    }
+
+    int playlistContentHeightForViewport(int trackCount, int visibleGridHeight)
+    {
+        const int viewportTrackCount = std::max(1, (visibleGridHeight + kPlaylistLaneHeight - 1) / kPlaylistLaneHeight);
+        return std::max(trackCount + 8, std::max(kPlaylistMinVisibleTracks, viewportTrackCount)) * kPlaylistLaneHeight;
+    }
+
+    RECT makeScrollbarThumbRect(const RECT& trackRect, int contentSize, int viewportSize, int scrollPos, bool horizontal)
+    {
+        RECT thumb = trackRect;
+        const int trackLength = horizontal ? rectWidth(trackRect) : rectHeight(trackRect);
+        const int maxScroll = std::max(0, contentSize - viewportSize);
+        if (trackLength <= 0)
+        {
+            return thumb;
+        }
+
+        if (maxScroll == 0 || contentSize <= 0)
+        {
+            return thumb;
+        }
+
+        const int minimumThumbSize = horizontal ? 26 : 24;
+        const int viewportClamped = std::max(1, viewportSize);
+        const int contentClamped = std::max(viewportClamped, contentSize);
+        const int thumbLength = std::clamp((trackLength * viewportClamped) / contentClamped, minimumThumbSize, trackLength);
+        const int thumbTravel = std::max(0, trackLength - thumbLength);
+        const int thumbOffset = thumbTravel == 0 ? 0 : (thumbTravel * std::clamp(scrollPos, 0, maxScroll)) / maxScroll;
+
+        if (horizontal)
+        {
+            thumb.left = trackRect.left + thumbOffset;
+            thumb.right = thumb.left + thumbLength;
+        }
+        else
+        {
+            thumb.top = trackRect.top + thumbOffset;
+            thumb.bottom = thumb.top + thumbLength;
+        }
+
+        return thumb;
+    }
 
     std::string chooseProjectFilePath(HWND owner, bool saveDialog, const std::string& initialPath)
     {
@@ -411,6 +521,29 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
         break;
 
+    case WM_PAINT:
+        if (ui != nullptr)
+        {
+            PAINTSTRUCT paintStruct{};
+            HDC dc = BeginPaint(hwnd, &paintStruct);
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            const int width = std::max(1, rectWidth(clientRect));
+            const int height = std::max(1, rectHeight(clientRect));
+
+            HDC bufferDc = CreateCompatibleDC(dc);
+            HBITMAP bufferBitmap = CreateCompatibleBitmap(dc, width, height);
+            HGDIOBJ oldBitmap = SelectObject(bufferDc, bufferBitmap);
+            ui->paintMainBackground(bufferDc);
+            BitBlt(dc, 0, 0, width, height, bufferDc, 0, 0, SRCCOPY);
+            SelectObject(bufferDc, oldBitmap);
+            DeleteObject(bufferBitmap);
+            DeleteDC(bufferDc);
+            EndPaint(hwnd, &paintStruct);
+            return 0;
+        }
+        break;
+
     case WM_DRAWITEM:
         if (ui != nullptr && lParam != 0)
         {
@@ -426,12 +559,7 @@ LRESULT CALLBACK UI::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         break;
 
     case WM_ERASEBKGND:
-        if (ui != nullptr)
-        {
-            ui->paintMainBackground(reinterpret_cast<HDC>(wParam));
-            return 1;
-        }
-        break;
+        return 1;
 
     case WM_SIZE:
         if (ui != nullptr)
@@ -540,6 +668,9 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
     switch (uMsg)
     {
+    case WM_ERASEBKGND:
+        return 1;
+
     case WM_PAINT:
         ui->paintSurface(hwnd, kind);
         return 0;
@@ -561,25 +692,24 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         {
             RECT clientRect{};
             GetClientRect(hwnd, &clientRect);
+            const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
             const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
             const bool ctrlPressed = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
             const bool shiftPressed = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
-            const int leftInset = kPlaylistTrackHeaderWidth;
-            const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
 
             if (ctrlPressed)
             {
                 POINT wheelPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 ScreenToClient(hwnd, &wheelPoint);
 
-                const int anchorPixel = std::max(0, static_cast<int>(wheelPoint.x) - leftInset);
-                const int previousColumnWidth = ui->playlistColumnWidth(visibleGridWidth);
+                const int anchorPixel = std::max(0, static_cast<int>(wheelPoint.x) - static_cast<int>(metrics.gridRect.left));
+                const int previousColumnWidth = ui->playlistColumnWidth(metrics.visibleGridWidth);
                 const double anchorCell =
                     static_cast<double>(ui->playlistScrollX_ + anchorPixel) /
                     static_cast<double>(std::max(1, previousColumnWidth));
 
                 ui->cycleZoom(false, wheelDelta > 0 ? 1 : -1);
-                const int nextColumnWidth = ui->playlistColumnWidth(visibleGridWidth);
+                const int nextColumnWidth = ui->playlistColumnWidth(metrics.visibleGridWidth);
                 const int nextScrollX =
                     static_cast<int>(std::round(anchorCell * static_cast<double>(nextColumnWidth))) - anchorPixel;
                 ui->scrollPlaylistTo(nextScrollX, ui->playlistScrollY_);
@@ -587,7 +717,7 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             else if (shiftPressed)
             {
                 ui->scrollPlaylistTo(
-                    ui->playlistScrollX_ - ((wheelDelta / WHEEL_DELTA) * std::max(24, ui->playlistColumnWidth(visibleGridWidth) / 2)),
+                    ui->playlistScrollX_ - ((wheelDelta / WHEEL_DELTA) * std::max(24, ui->playlistColumnWidth(metrics.visibleGridWidth) / 2)),
                     ui->playlistScrollY_);
             }
             else
@@ -645,9 +775,8 @@ LRESULT CALLBACK UI::SurfaceProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         {
             RECT clientRect{};
             GetClientRect(hwnd, &clientRect);
-            const int leftInset = kPlaylistTrackHeaderWidth;
-            const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
-            const int lineStep = std::max(24, ui->playlistColumnWidth(visibleGridWidth) / 2);
+            const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+            const int lineStep = std::max(24, ui->playlistColumnWidth(metrics.visibleGridWidth) / 2);
             SCROLLINFO info{};
             info.cbSize = sizeof(info);
             info.fMask = SIF_ALL;
@@ -920,6 +1049,7 @@ void UI::registerWindowClass()
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEXA);
+    wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = UI::WindowProc;
     wc.hInstance = hInstance_;
     wc.lpszClassName = kWindowClassName;
@@ -933,6 +1063,7 @@ void UI::registerWindowClass()
 
     WNDCLASSEXA managerClass{};
     managerClass.cbSize = sizeof(WNDCLASSEXA);
+    managerClass.style = CS_DBLCLKS;
     managerClass.lpfnWndProc = UI::PluginManagerProc;
     managerClass.hInstance = hInstance_;
     managerClass.lpszClassName = kPluginManagerClassName;
@@ -946,6 +1077,7 @@ void UI::registerWindowClass()
 
     WNDCLASSEXA surfaceClass{};
     surfaceClass.cbSize = sizeof(WNDCLASSEXA);
+    surfaceClass.style = CS_DBLCLKS;
     surfaceClass.lpfnWndProc = UI::SurfaceProc;
     surfaceClass.hInstance = hInstance_;
     surfaceClass.lpszClassName = kSurfaceClassName;
@@ -959,6 +1091,7 @@ void UI::registerWindowClass()
 
     WNDCLASSEXA detachedPaneClass{};
     detachedPaneClass.cbSize = sizeof(WNDCLASSEXA);
+    detachedPaneClass.style = CS_DBLCLKS;
     detachedPaneClass.lpfnWndProc = UI::DetachedPaneProc;
     detachedPaneClass.hInstance = hInstance_;
     detachedPaneClass.lpszClassName = kDetachedPaneClassName;
@@ -1069,7 +1202,7 @@ void UI::createMainMenu()
 
 void UI::createControls()
 {
-    const DWORD buttonStyle = WS_VISIBLE | WS_CHILD | BS_OWNERDRAW;
+    const DWORD buttonStyle = WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | BS_OWNERDRAW | BS_NOTIFY;
     const DWORD checkboxStyle = WS_VISIBLE | WS_CHILD | BS_OWNERDRAW;
     const DWORD staticStyle = WS_VISIBLE | WS_CHILD | SS_LEFT;
     const WORD menuButtonIds[8] = {
@@ -1177,7 +1310,7 @@ void UI::createControls()
     playlistToolPrevButton_ = CreateWindowA("BUTTON", "Draw", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolPrev), hInstance_, nullptr);
     playlistToolNextButton_ = CreateWindowA("BUTTON", "Slice", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonPlaylistToolNext), hInstance_, nullptr);
     playlistHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylistHeader), hInstance_, nullptr);
-    playlistPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER | WS_VSCROLL | WS_HSCROLL, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylist), hInstance_, this);
+    playlistPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelPlaylist), hInstance_, this);
     mixerMenuButton_ = CreateWindowA("BUTTON", "v", buttonStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdButtonMenuMixer), hInstance_, nullptr);
     mixerHeaderLabel_ = CreateWindowA("STATIC", "", staticStyle, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelMixerHeader), hInstance_, nullptr);
     mixerPanel_ = CreateWindowA(kSurfaceClassName, "", WS_VISIBLE | WS_CHILD | WS_BORDER, 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IdLabelMixer), hInstance_, this);
@@ -1261,7 +1394,7 @@ void UI::layoutControls()
     const int timePanelWidth = 210;
     const int transportX = timePanelX + timePanelWidth + 18;
     const int transportY = topPanelY + 18;
-    const int patternClusterWidth = 484;
+    const int patternClusterWidth = 392;
     const int patternClusterMinX = transportX + 344;
     const int patternClusterMaxX = std::max(kOuterPadding, width - kOuterPadding - patternClusterWidth);
     const int patternClusterX =
@@ -1272,13 +1405,13 @@ void UI::layoutControls()
     MoveWindow(playButton_, transportX, transportY + 6, 46, 36, TRUE);
     MoveWindow(stopTransportButton_, transportX + 48, transportY + 6, 46, 36, TRUE);
     MoveWindow(patSongButton_, transportX + 96, transportY + 6, 46, 36, TRUE);
-    MoveWindow(songModeButton_, transportX + 144, transportY + 6, 46, 36, TRUE);
-    MoveWindow(recordButton_, transportX + 198, transportY + 7, 34, 34, TRUE);
-    MoveWindow(tempoLabel_, transportX + 246, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
-    MoveWindow(chronoButton_, transportX + 246 + kTempoDisplayWidth + kChronometerGap, transportY + 4, kChronometerWidth, kChronometerHeight, TRUE);
+    MoveWindow(songModeButton_, transportX + 142, transportY + 6, 46, 36, TRUE);
+    MoveWindow(recordButton_, transportX + 194, transportY + 7, 34, 34, TRUE);
+    MoveWindow(tempoLabel_, transportX + 242, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+    MoveWindow(chronoButton_, transportX + 242 + kTempoDisplayWidth + kChronometerGap, transportY + 4, kChronometerWidth, kChronometerHeight, TRUE);
     if (tempoEditHwnd_ != nullptr)
     {
-        MoveWindow(tempoEditHwnd_, transportX + 246, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
+        MoveWindow(tempoEditHwnd_, transportX + 242, transportY + 4, kTempoDisplayWidth, kTempoDisplayHeight, TRUE);
     }
 
     int patternButtonX = patternClusterX;
@@ -1293,10 +1426,6 @@ void UI::layoutControls()
     MoveWindow(channelRackButton_, patternButtonX, transportY + 6, 78, 34, TRUE);
     patternButtonX += 80;
     MoveWindow(mixerButton_, patternButtonX, transportY + 6, 60, 34, TRUE);
-    patternButtonX += 72;
-    MoveWindow(playlistToolPrevButton_, patternButtonX, transportY + 6, 58, 34, TRUE);
-    patternButtonX += 60;
-    MoveWindow(playlistToolNextButton_, patternButtonX, transportY + 6, 58, 34, TRUE);
 
     ShowWindow(playButton_, SW_SHOW);
     ShowWindow(stopTransportButton_, SW_SHOW);
@@ -1397,6 +1526,22 @@ void UI::layoutControls()
     const int playlistHeight =
         std::max(160, workspaceHeight - (lowerDockHeight > 0 ? lowerDockHeight + kGap : 0));
     MoveWindow(playlistPanel_, workspaceX, y, workspaceWidth, playlistHeight, TRUE);
+    SetWindowPos(
+        playlistToolPrevButton_,
+        HWND_TOP,
+        workspaceX + 8,
+        y + 2,
+        kPlaylistToolButtonWidth,
+        kPlaylistToolButtonHeight,
+        SWP_SHOWWINDOW);
+    SetWindowPos(
+        playlistToolNextButton_,
+        HWND_TOP,
+        workspaceX + 8 + kPlaylistToolButtonWidth + kPlaylistToolButtonGap,
+        y + 2,
+        kPlaylistToolButtonWidth,
+        kPlaylistToolButtonHeight,
+        SWP_SHOWWINDOW);
 
     if (DockedPaneState* pane = findDockedPane(WorkspacePane::Playlist))
     {
@@ -1459,7 +1604,7 @@ void UI::layoutControls()
     ensureDetachedWindows();
     updateBrowserScrollBar();
     updatePlaylistScrollBars();
-    InvalidateRect(hwnd_, nullptr, TRUE);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void UI::ensureDetachedWindows()
@@ -1716,7 +1861,7 @@ void UI::invalidateSurface(HWND surface)
 {
     if (surface != nullptr)
     {
-        InvalidateRect(surface, nullptr, TRUE);
+        InvalidateRect(surface, nullptr, FALSE);
     }
 }
 
@@ -1791,9 +1936,43 @@ void UI::stopUiTimer()
 
 void UI::refreshFromEngineSnapshot()
 {
+    const AudioEngine::TransportState previousTransportState = visibleState_.transportState;
+    const std::uint64_t previousRevision = visibleState_.project.revision;
+    const std::size_t previousTrackCount = visibleState_.project.tracks.size();
+    const std::size_t previousPatternCount = visibleState_.project.patterns.size();
+    const std::size_t previousPlaylistItemCount = visibleState_.project.playlistItems.size();
+    const bool previousDirty = visibleState_.project.dirty;
+    const double previousDisplayedSeconds = displayedTimelineSeconds();
+    const auto now = std::chrono::steady_clock::now();
+
     visibleState_ = buildVisibleEngineState();
-    displayedTimelineAnchorSeconds_ = std::max(0.0, visibleState_.timelineSeconds);
-    displayedTimelineAnchorClock_ = std::chrono::steady_clock::now();
+    const double snapshotTimelineSeconds = std::max(0.0, visibleState_.timelineSeconds);
+    const bool wasPlaying = previousTransportState == AudioEngine::TransportState::Playing;
+    const bool isPlaying = visibleState_.transportState == AudioEngine::TransportState::Playing;
+
+    if (!wasPlaying || !isPlaying)
+    {
+        displayedTimelineAnchorSeconds_ = snapshotTimelineSeconds;
+        displayedTimelineAnchorClock_ = now;
+    }
+    else
+    {
+        const double driftSeconds = snapshotTimelineSeconds - previousDisplayedSeconds;
+        const bool hardResync =
+            std::abs(driftSeconds) > 0.125 ||
+            snapshotTimelineSeconds < (previousDisplayedSeconds - 0.02);
+        if (hardResync)
+        {
+            displayedTimelineAnchorSeconds_ = snapshotTimelineSeconds;
+        }
+        else
+        {
+            displayedTimelineAnchorSeconds_ =
+                std::max(0.0, previousDisplayedSeconds + (driftSeconds * 0.35));
+        }
+        displayedTimelineAnchorClock_ = now;
+    }
+
     refreshPluginManagerState();
 
     if (!visibleState_.project.tracks.empty() && selectedTrackIndex_ >= visibleState_.project.tracks.size())
@@ -1820,7 +1999,27 @@ void UI::refreshFromEngineSnapshot()
     updateViewButtons();
     updateWindowTitle();
     updatePluginManagerControls();
-    invalidateAllSurfaces();
+
+    const bool projectStructureChanged =
+        previousRevision != visibleState_.project.revision ||
+        previousTrackCount != visibleState_.project.tracks.size() ||
+        previousPatternCount != visibleState_.project.patterns.size() ||
+        previousPlaylistItemCount != visibleState_.project.playlistItems.size() ||
+        previousDirty != visibleState_.project.dirty ||
+        previousTransportState != visibleState_.transportState;
+
+    if (projectStructureChanged || visibleState_.transportState != AudioEngine::TransportState::Playing)
+    {
+        invalidateAllSurfaces();
+    }
+    else
+    {
+        invalidateSurface(playlistPanel_);
+        invalidateSurface(channelRackPanel_);
+        invalidateSurface(stepSequencerPanel_);
+        invalidateSurface(pianoRollPanel_);
+        invalidateSurface(mixerPanel_);
+    }
 }
 
 UI::VisibleEngineState UI::buildVisibleEngineState() const
@@ -1955,7 +2154,7 @@ void UI::updateTransportControls()
     SetWindowTextA(recordButton_, "Rec");
     SetWindowTextA(patSongButton_, "PAT");
     SetWindowTextA(songModeButton_, "SONG");
-    SetWindowTextA(chronoButton_, workspace_.chronometerEnabled ? "CLK" : "OFF");
+    SetWindowTextA(chronoButton_, "");
     SetWindowTextA(playlistToolPrevButton_, "Draw");
     SetWindowTextA(playlistToolNextButton_, "Slice");
 
@@ -1974,23 +2173,29 @@ void UI::updateTransportControls()
     setStaticText(patternLabel_, activePatternLabel);
     setStaticText(snapLabel_, "Snap " + currentSnapLabel());
 
-    InvalidateRect(engineStartButton_, nullptr, TRUE);
-    InvalidateRect(playButton_, nullptr, TRUE);
-    InvalidateRect(stopTransportButton_, nullptr, TRUE);
-    InvalidateRect(recordButton_, nullptr, TRUE);
-    InvalidateRect(patSongButton_, nullptr, TRUE);
-    InvalidateRect(songModeButton_, nullptr, TRUE);
-    InvalidateRect(chronoButton_, nullptr, TRUE);
-    InvalidateRect(tempoLabel_, nullptr, TRUE);
-    InvalidateRect(patternLabel_, nullptr, TRUE);
-    InvalidateRect(patternPrevButton_, nullptr, TRUE);
-    InvalidateRect(patternNextButton_, nullptr, TRUE);
-    InvalidateRect(channelRackButton_, nullptr, TRUE);
-    InvalidateRect(pianoRollButton_, nullptr, TRUE);
-    InvalidateRect(mixerButton_, nullptr, TRUE);
-    InvalidateRect(playlistToolPrevButton_, nullptr, TRUE);
-    InvalidateRect(playlistToolNextButton_, nullptr, TRUE);
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(engineStartButton_, nullptr, FALSE);
+    InvalidateRect(playButton_, nullptr, FALSE);
+    InvalidateRect(stopTransportButton_, nullptr, FALSE);
+    InvalidateRect(recordButton_, nullptr, FALSE);
+    InvalidateRect(patSongButton_, nullptr, FALSE);
+    InvalidateRect(songModeButton_, nullptr, FALSE);
+    InvalidateRect(chronoButton_, nullptr, FALSE);
+    InvalidateRect(tempoLabel_, nullptr, FALSE);
+    InvalidateRect(patternLabel_, nullptr, FALSE);
+    InvalidateRect(patternPrevButton_, nullptr, FALSE);
+    InvalidateRect(patternNextButton_, nullptr, FALSE);
+    InvalidateRect(channelRackButton_, nullptr, FALSE);
+    InvalidateRect(pianoRollButton_, nullptr, FALSE);
+    InvalidateRect(mixerButton_, nullptr, FALSE);
+    InvalidateRect(playlistToolPrevButton_, nullptr, FALSE);
+    InvalidateRect(playlistToolNextButton_, nullptr, FALSE);
+    if (hwnd_ != nullptr)
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd_, &clientRect);
+        RECT topToolbarRect{clientRect.left, 28, clientRect.right, 28 + 104};
+        InvalidateRect(hwnd_, &topToolbarRect, FALSE);
+    }
 }
 
 void UI::updateStatusLabel()
@@ -2321,9 +2526,8 @@ bool UI::isTempoFineTuneHit(HWND hwnd, int x) const
 {
     RECT rect{};
     GetClientRect(hwnd, &rect);
-    const int arrowZoneWidth = 18;
     const int fineZoneWidth = 34;
-    return x >= (rect.right - arrowZoneWidth - fineZoneWidth) && x < (rect.right - arrowZoneWidth);
+    return x >= (rect.right - fineZoneWidth);
 }
 
 void UI::applyTempoStep(bool fineAdjust, double delta)
@@ -2398,6 +2602,14 @@ void UI::beginTempoInlineEdit()
     std::snprintf(tempoBuffer, sizeof(tempoBuffer), "%.3f", workspace_.tempoBpm);
     SetWindowTextA(tempoEditHwnd_, tempoBuffer);
     SendMessageA(tempoEditHwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(editFont), TRUE);
+    SetWindowPos(
+        tempoEditHwnd_,
+        HWND_TOP,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        SWP_SHOWWINDOW);
     tempoEditProc_ = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrA(tempoEditHwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&UI::TempoEditProc)));
     SetFocus(tempoEditHwnd_);
@@ -2770,6 +2982,9 @@ void UI::showPatternSelectorPopup()
 
     RECT anchorRect{};
     GetWindowRect(patternPrevButton_, &anchorRect);
+    patternPopupOpen_ = true;
+    InvalidateRect(patternPrevButton_, nullptr, FALSE);
+    UpdateWindow(patternPrevButton_);
     SetForegroundWindow(hwnd_);
     TrackPopupMenu(
         popupMenu,
@@ -2779,6 +2994,8 @@ void UI::showPatternSelectorPopup()
         0,
         hwnd_,
         nullptr);
+    patternPopupOpen_ = false;
+    InvalidateRect(patternPrevButton_, nullptr, FALSE);
     DestroyMenu(popupMenu);
 }
 
