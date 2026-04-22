@@ -228,6 +228,8 @@ public:
         bool marqueeActive = false;
         bool browserDragActive = false;
         bool editingAutomationPoint = false;
+        bool draggingPlaylistHorizontalScroll = false;
+        bool draggingPlaylistVerticalScroll = false;
         POINT dragStart{};
         POINT dragCurrent{};
         std::uint32_t selectedClipId = 0;
@@ -235,6 +237,7 @@ public:
         std::size_t selectedBrowserItemIndex = static_cast<std::size_t>(-1);
         std::size_t selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
         std::size_t selectedAutomationPointIndex = static_cast<std::size_t>(-1);
+        int playlistScrollDragOffset = 0;
         RECT marqueeRect{};
         std::vector<UiClipVisual> playlistClipVisuals;
         std::vector<UiNoteVisual> pianoNoteVisuals;
@@ -847,6 +850,7 @@ private:
     std::size_t selectedTrackIndex_ = 0;
     double displayedTimelineAnchorSeconds_ = 0.0;
     std::chrono::steady_clock::time_point displayedTimelineAnchorClock_{};
+    bool patternPopupOpen_ = false;
     WNDPROC tempoControlProc_ = nullptr;
     WNDPROC tempoEditProc_ = nullptr;
     bool tempoDragActive_ = false;
