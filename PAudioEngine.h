@@ -149,6 +149,8 @@ public:
         AddTrack,
         AddBus,
         AddPattern,
+        ClonePattern,
+        DeletePattern,
         AddClipToTrack,
         TogglePatternStep,
         UpsertMidiNote,
@@ -887,7 +889,13 @@ public:
     bool addTrack(const std::string& name);
     bool addBus(const std::string& name);
     bool addPattern(const std::string& name);
-    bool addClipToTrack(std::uint32_t trackId, const std::string& clipName);
+    bool clonePattern(int patternNumber);
+    bool deletePattern(int patternNumber);
+    bool addClipToTrack(
+        std::uint32_t trackId,
+        const std::string& clipName,
+        double startTimeSeconds = 0.0,
+        double durationSeconds = -1.0);
     bool togglePatternStep(int patternNumber, std::uint32_t trackId, int stepIndex);
     bool upsertMidiNote(int patternNumber, std::uint32_t trackId, std::size_t noteIndex, const MidiNoteState& note, bool createIfMissing);
     bool setAutomationPoint(std::uint32_t clipId, int pointIndex, int cell, int value);
