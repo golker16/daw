@@ -1,7 +1,256 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <functional>
 #include <iterator>
+
+namespace
+{
+    bool isSampleFilePath(const std::filesystem::path& path)
+    {
+        std::string extension = path.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value)
+        {
+            return static_cast<char>(std::tolower(value));
+        });
+
+        return extension == ".wav" ||
+            extension == ".mp3" ||
+            extension == ".flac" ||
+            extension == ".aif" ||
+            extension == ".aiff" ||
+            extension == ".ogg";
+    }
+
+    std::string displayNameForPath(const std::filesystem::path& path)
+    {
+        std::string name = path.filename().string();
+        if (name.empty())
+        {
+            name = path.root_name().string();
+        }
+        if (name.empty())
+        {
+            name = path.string();
+        }
+        return name;
+    }
+}
+
+bool UI::isBrowserGroupExpanded(const std::string& id) const
+{
+    return std::find(expandedBrowserGroupIds_.begin(), expandedBrowserGroupIds_.end(), id) != expandedBrowserGroupIds_.end();
+}
+
+void UI::setBrowserGroupExpanded(const std::string& id, bool expanded)
+{
+    auto entryIt = std::find(expandedBrowserGroupIds_.begin(), expandedBrowserGroupIds_.end(), id);
+    if (expanded)
+    {
+        if (entryIt == expandedBrowserGroupIds_.end())
+        {
+            expandedBrowserGroupIds_.push_back(id);
+        }
+    }
+    else if (entryIt != expandedBrowserGroupIds_.end())
+    {
+        expandedBrowserGroupIds_.erase(entryIt);
+    }
+}
+
+void UI::toggleBrowserGroup(const std::string& id)
+{
+    setBrowserGroupExpanded(id, !isBrowserGroupExpanded(id));
+    rebuildBrowserEntries();
+    updateBrowserScrollBar();
+    invalidateSurface(browserPanel_);
+}
+
+void UI::addSampleLibraryRoot(const std::string& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path absolutePath = std::filesystem::absolute(std::filesystem::path(path), ec);
+    const std::string normalizedPath = ec ? path : absolutePath.lexically_normal().string();
+    if (normalizedPath.empty())
+    {
+        return;
+    }
+
+    if (std::find(sampleLibraryRoots_.begin(), sampleLibraryRoots_.end(), normalizedPath) == sampleLibraryRoots_.end())
+    {
+        sampleLibraryRoots_.push_back(normalizedPath);
+    }
+
+    setBrowserGroupExpanded("sample:" + normalizedPath, true);
+}
+
+void UI::handleBrowserDrop(WPARAM dropHandle)
+{
+    HDROP droppedFiles = reinterpret_cast<HDROP>(dropHandle);
+    if (droppedFiles != nullptr)
+    {
+        DragFinish(droppedFiles);
+    }
+}
+
+int UI::playlistTrackLaneCount() const
+{
+    return std::max(1, static_cast<int>(visibleState_.project.tracks.size()));
+}
+
+int UI::playlistTotalCellCount() const
+{
+    int maxCell = 64;
+
+    for (const auto& block : workspaceModel_.playlistBlocks)
+    {
+        maxCell = std::max(maxCell, block.startCell + block.lengthCells + 8);
+    }
+
+    for (const auto& marker : workspaceModel_.markers)
+    {
+        maxCell = std::max(maxCell, marker.timelineCell + 8);
+    }
+
+    const int rounded = ((maxCell + 15) / 16) * 16;
+    return std::max(64, rounded);
+}
+
+int UI::playlistColumnWidth(int availableWidth) const
+{
+    static constexpr int kWidths[] = {24, 32, 48, 72, 104};
+    const int width = kWidths[std::min<std::size_t>(workspace_.playlistZoomIndex, 4)];
+    return std::min(std::max(20, width), std::max(20, availableWidth));
+}
+
+void UI::clampBrowserScroll()
+{
+    if (browserPanel_ == nullptr)
+    {
+        browserScrollY_ = 0;
+        return;
+    }
+
+    RECT clientRect{};
+    GetClientRect(browserPanel_, &clientRect);
+    const int visibleHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - 4);
+    const int contentHeight = static_cast<int>(workspaceModel_.browserEntries.size()) * kBrowserRowHeight;
+    const int maxScroll = std::max(0, contentHeight - visibleHeight);
+    browserScrollY_ = clampValue(browserScrollY_, 0, maxScroll);
+}
+
+void UI::clampPlaylistScroll()
+{
+    if (playlistPanel_ == nullptr)
+    {
+        playlistScrollX_ = 0;
+        playlistScrollY_ = 0;
+        return;
+    }
+
+    RECT clientRect{};
+    GetClientRect(playlistPanel_, &clientRect);
+    const int leftInset = kPlaylistTrackHeaderWidth;
+    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+    const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
+    const int visibleGridHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - timelineHeight);
+    const int contentWidth = playlistTotalCellCount() * playlistColumnWidth(visibleGridWidth);
+    const int viewportTrackCount = std::max(1, (visibleGridHeight + kPlaylistLaneHeight - 1) / kPlaylistLaneHeight);
+    const int contentHeight =
+        std::max(
+            playlistTrackLaneCount() + 8,
+            std::max(kPlaylistMinVisibleTracks, viewportTrackCount)) * kPlaylistLaneHeight;
+    const int maxScrollX = std::max(0, contentWidth - visibleGridWidth);
+    const int maxScrollY = std::max(0, contentHeight - visibleGridHeight);
+    playlistScrollX_ = clampValue(playlistScrollX_, 0, maxScrollX);
+    playlistScrollY_ = clampValue(playlistScrollY_, 0, maxScrollY);
+}
+
+void UI::updateBrowserScrollBar()
+{
+    if (browserPanel_ == nullptr)
+    {
+        return;
+    }
+
+    clampBrowserScroll();
+
+    RECT clientRect{};
+    GetClientRect(browserPanel_, &clientRect);
+    const int visibleHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - 4);
+    const int contentHeight = std::max(visibleHeight, static_cast<int>(workspaceModel_.browserEntries.size()) * kBrowserRowHeight);
+
+    SCROLLINFO info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
+    info.nMin = 0;
+    info.nMax = std::max(0, contentHeight - 1);
+    info.nPage = static_cast<UINT>(visibleHeight);
+    info.nPos = browserScrollY_;
+    SetScrollInfo(browserPanel_, SB_VERT, &info, TRUE);
+}
+
+void UI::updatePlaylistScrollBars()
+{
+    if (playlistPanel_ == nullptr)
+    {
+        return;
+    }
+
+    clampPlaylistScroll();
+
+    RECT clientRect{};
+    GetClientRect(playlistPanel_, &clientRect);
+    const int leftInset = kPlaylistTrackHeaderWidth;
+    const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+    const int visibleGridWidth = std::max(1, static_cast<int>(clientRect.right - clientRect.left) - leftInset);
+    const int visibleGridHeight = std::max(1, static_cast<int>(clientRect.bottom - clientRect.top) - timelineHeight);
+    const int contentWidth = std::max(visibleGridWidth, playlistTotalCellCount() * playlistColumnWidth(visibleGridWidth));
+    const int viewportTrackCount = std::max(1, (visibleGridHeight + kPlaylistLaneHeight - 1) / kPlaylistLaneHeight);
+    const int contentHeight =
+        std::max(
+            playlistTrackLaneCount() + 8,
+            std::max(kPlaylistMinVisibleTracks, viewportTrackCount)) * kPlaylistLaneHeight;
+
+    SCROLLINFO horizontalInfo{};
+    horizontalInfo.cbSize = sizeof(horizontalInfo);
+    horizontalInfo.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
+    horizontalInfo.nMin = 0;
+    horizontalInfo.nMax = std::max(0, contentWidth - 1);
+    horizontalInfo.nPage = static_cast<UINT>(visibleGridWidth);
+    horizontalInfo.nPos = playlistScrollX_;
+    SetScrollInfo(playlistPanel_, SB_HORZ, &horizontalInfo, TRUE);
+
+    SCROLLINFO verticalInfo{};
+    verticalInfo.cbSize = sizeof(verticalInfo);
+    verticalInfo.fMask = SIF_PAGE | SIF_POS | SIF_RANGE;
+    verticalInfo.nMin = 0;
+    verticalInfo.nMax = std::max(0, contentHeight - 1);
+    verticalInfo.nPage = static_cast<UINT>(visibleGridHeight);
+    verticalInfo.nPos = playlistScrollY_;
+    SetScrollInfo(playlistPanel_, SB_VERT, &verticalInfo, TRUE);
+}
+
+void UI::scrollBrowserTo(int y)
+{
+    browserScrollY_ = y;
+    updateBrowserScrollBar();
+    invalidateSurface(browserPanel_);
+}
+
+void UI::scrollPlaylistTo(int x, int y)
+{
+    playlistScrollX_ = x;
+    playlistScrollY_ = y;
+    updatePlaylistScrollBars();
+    invalidateSurface(playlistPanel_);
+}
 
 void UI::rebuildPlaylistVisuals(const RECT& rect)
 {
@@ -9,7 +258,10 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
     const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
     const int laneHeight = kPlaylistLaneHeight;
     const int leftInset = kPlaylistTrackHeaderWidth;
-    const int columnWidth = std::max<int>(24, (static_cast<int>(rect.right) - leftInset) / kPlaylistCellCount);
+    const int clientWidth = static_cast<int>(rect.right - rect.left);
+    const int columnWidth = playlistColumnWidth(std::max(1, clientWidth - leftInset));
+    const int clipTopBase = rect.top + timelineHeight + 6 - playlistScrollY_;
+    const int clipLeftBase = rect.left + leftInset - playlistScrollX_;
 
     for (const auto& block : workspaceModel_.playlistBlocks)
     {
@@ -18,36 +270,23 @@ void UI::rebuildPlaylistVisuals(const RECT& rect)
         visual.trackId = block.trackId;
         visual.label = block.label;
         visual.clipType = block.clipType;
-        visual.rect.x = leftInset + (block.startCell * columnWidth);
-        visual.rect.y = timelineHeight + 6 + (block.lane * laneHeight);
+        visual.rect.x = clipLeftBase + (block.startCell * columnWidth);
+        visual.rect.y = clipTopBase + (block.lane * laneHeight);
         visual.rect.width = std::max(42, block.lengthCells * columnWidth - 6);
         visual.rect.height = laneHeight - 10;
         visual.selected = block.selected || (block.clipId == interactionState_.selectedClipId);
         visual.automation = false;
         visual.resizeLeftHot = false;
         visual.resizeRightHot = false;
-        visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
-        visual.rect.width = std::min<int>(visual.rect.width, std::max<int>(30, static_cast<int>(rect.right) - visual.rect.x - 6));
-        interactionState_.playlistClipVisuals.push_back(visual);
-    }
 
-    for (const auto& automation : workspaceModel_.automationLanes)
-    {
-        UiClipVisual visual{};
-        visual.clipId = automation.clipId;
-        visual.trackId = 0;
-        visual.label = automation.target;
-        visual.clipType = "Automation";
-        visual.rect.x = leftInset + (automation.startCell * columnWidth);
-        visual.rect.y = timelineHeight + 6 + (automation.lane * laneHeight);
-        visual.rect.width = std::max(42, automation.lengthCells * columnWidth - 6);
-        visual.rect.height = laneHeight - 10;
-        visual.selected = automation.selected || (automation.clipId == interactionState_.selectedClipId);
-        visual.automation = true;
-        visual.resizeLeftHot = false;
-        visual.resizeRightHot = false;
-        visual.rect.x = clampValue(visual.rect.x, leftInset, rect.right - 50);
-        visual.rect.width = std::min<int>(visual.rect.width, std::max<int>(30, static_cast<int>(rect.right) - visual.rect.x - 6));
+        if (visual.rect.x + visual.rect.width < rect.left + leftInset ||
+            visual.rect.x > rect.right ||
+            visual.rect.y + visual.rect.height < rect.top + timelineHeight ||
+            visual.rect.y > rect.bottom)
+        {
+            continue;
+        }
+
         interactionState_.playlistClipVisuals.push_back(visual);
     }
 }
@@ -144,140 +383,137 @@ void UI::rebuildBrowserEntries()
 {
     workspaceModel_.browserEntries.clear();
 
-    auto addEntry = [&](std::string category, std::string label, std::string subtitle, bool favorite = false, int indentLevel = 0, bool group = false, bool expanded = false)
+    auto addEntry =
+        [&](std::string id,
+            std::string category,
+            std::string label,
+            std::string subtitle,
+            std::string payloadPath = {},
+            bool favorite = false,
+            int indentLevel = 0,
+            bool group = false,
+            bool expanded = false,
+            bool draggable = false,
+            bool folder = false)
     {
         workspaceModel_.browserEntries.push_back(
             BrowserEntry{
+                std::move(id),
                 std::move(category),
                 std::move(label),
                 std::move(subtitle),
+                std::move(payloadPath),
                 favorite,
                 indentLevel,
                 group,
-                expanded});
+                expanded,
+                draggable,
+                folder});
     };
 
-    switch (std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1))
+    const bool patternsExpanded = isBrowserGroupExpanded("project:patterns");
+    const bool audioExpanded = isBrowserGroupExpanded("project:audio");
+
+    addEntry(
+        "project:patterns",
+        "Patterns",
+        "Patterns",
+        std::to_string(workspaceModel_.patterns.size()) + " pattern(s)",
+        {},
+        false,
+        0,
+        true,
+        patternsExpanded);
+
+    if (patternsExpanded)
     {
-    case 0:
-        addEntry(
-            "Project",
-            visibleState_.project.projectName.empty() ? "Current project" : visibleState_.project.projectName,
-            visibleState_.document.sessionPath.empty() ? "Playlist, patterns and channels" : visibleState_.document.sessionPath,
-            false,
-            0,
-            true,
-            true);
-        addEntry(
-            "Patterns",
-            "Patterns",
-            std::to_string(workspaceModel_.patterns.size()) + " pattern slots",
-            false,
-            0,
-            true,
-            true);
-        for (const auto& pattern : workspaceModel_.patterns)
+        if (workspaceModel_.patterns.empty())
         {
-            int laneCountWithSteps = 0;
-            for (const auto& lane : pattern.lanes)
+            addEntry("project:patterns:empty", "Pattern", "<empty>", "No patterns in the project yet.", {}, false, 1);
+        }
+        else
+        {
+            for (const auto& pattern : workspaceModel_.patterns)
             {
-                if (std::any_of(
-                        lane.steps.begin(),
-                        lane.steps.end(),
-                        [](const ChannelStepState& step) { return step.enabled; }))
+                int laneCountWithSteps = 0;
+                for (const auto& lane : pattern.lanes)
                 {
-                    ++laneCountWithSteps;
+                    if (std::any_of(
+                            lane.steps.begin(),
+                            lane.steps.end(),
+                            [](const ChannelStepState& step) { return step.enabled; }))
+                    {
+                        ++laneCountWithSteps;
+                    }
                 }
-            }
 
-            addEntry(
-                "Pattern",
-                pattern.name,
-                std::to_string(pattern.lanes.size()) + " channels | " +
-                    std::to_string(laneCountWithSteps) + " active step lanes | " +
-                    std::to_string(pattern.lengthInBars) + " bars",
-                pattern.patternNumber == workspace_.activePattern,
-                1);
-        }
-
-        if (!visibleState_.project.tracks.empty())
-        {
-            addEntry(
-                "Channel Rack",
-                "Channels",
-                std::to_string(visibleState_.project.tracks.size()) + " playlist tracks",
-                false,
-                0,
-                true,
-                true);
-
-            const std::size_t visibleTrackCount = std::min<std::size_t>(visibleState_.project.tracks.size(), 6);
-            for (std::size_t index = 0; index < visibleTrackCount; ++index)
-            {
-                const auto& track = visibleState_.project.tracks[index];
                 addEntry(
-                    "Track",
-                    track.name,
-                    std::to_string(track.clips.size()) + " clips | Bus " + std::to_string(track.busId),
-                    track.trackId == visibleState_.selection.selectedTrackId,
-                    1);
+                    "project:pattern:" + std::to_string(pattern.patternNumber),
+                    "Pattern",
+                    pattern.name,
+                    std::to_string(pattern.lanes.size()) + " channels | " +
+                        std::to_string(laneCountWithSteps) + " active lanes | " +
+                        std::to_string(pattern.lengthInBars) + " bars",
+                    {},
+                    pattern.patternNumber == workspace_.activePattern,
+                    1,
+                    false,
+                    false,
+                    false);
             }
         }
-        break;
-
-    case 1:
-    {
-        addEntry("Packs", "Packs", "Samples, one-shots and rendered audio", false, 0, true, true);
-        bool addedAudio = false;
-        for (const auto& block : workspaceModel_.playlistBlocks)
-        {
-            if (block.clipType != "Audio")
-            {
-                continue;
-            }
-
-            addedAudio = true;
-            addEntry(
-                "Audio",
-                block.label,
-                "Playlist lane " + std::to_string(block.lane + 1) + " | Start " +
-                    std::to_string(block.startCell + 1) + " | Length " + std::to_string(block.lengthCells) + " cells",
-                block.selected,
-                1);
-        }
-
-        if (!addedAudio)
-        {
-            addEntry("Sample", "Lead Vox Chop", "Preview sample ready for playlist", true, 1);
-            addEntry("Sample", "Impact Downlifter", "Transition FX clip", false, 1);
-            addEntry("Sample", "Analog Bass One-Shot", "Sampler-ready source clip", false, 1);
-        }
-
-        addEntry("Presets", "Plugin database", "Presets, wrappers and channel states", false, 0, true, true);
-        addEntry("Preset", "Sampler defaults", "Compact rack preset ready for drag-drop", false, 1);
-        break;
     }
 
-    default:
-        addEntry("Current project", "Automation clips", "Playlist envelopes and linked controls", false, 0, true, true);
-        for (const auto& automation : workspaceModel_.automationLanes)
+    std::vector<const PlaylistBlockState*> audioBlocks;
+    for (const auto& block : workspaceModel_.playlistBlocks)
+    {
+        if (block.clipType == "Audio")
         {
-            addEntry(
-                "Automation",
-                automation.target,
-                "Lane " + std::to_string(automation.lane + 1) + " | Start " +
-                    std::to_string(automation.startCell + 1) + " | " +
-                    std::to_string(automation.values.size()) + " points",
-                automation.selected,
-                1);
+            audioBlocks.push_back(&block);
         }
+    }
 
-        if (workspaceModel_.automationLanes.empty())
+    addEntry(
+        "project:audio",
+        "Audio",
+        "Audio Clips",
+        std::to_string(audioBlocks.size()) + " audio clip(s)",
+        {},
+        false,
+        0,
+        true,
+        audioExpanded);
+
+    if (audioExpanded)
+    {
+        if (audioBlocks.empty())
         {
-            addEntry("Automation", "Master Volume", "Fallback envelope lane", true, 1);
-            addEntry("Automation", "Filter Cutoff", "Sweep automation clip", false, 1);
+            addEntry("project:audio:empty", "Audio", "<empty>", "No audio clips in the playlist yet.", {}, false, 1);
         }
-        break;
+        else
+        {
+            for (const PlaylistBlockState* block : audioBlocks)
+            {
+                std::string trackName = "Track " + std::to_string(block->lane + 1);
+                if (block->lane >= 0 && block->lane < static_cast<int>(visibleState_.project.tracks.size()))
+                {
+                    trackName = visibleState_.project.tracks[static_cast<std::size_t>(block->lane)].name;
+                }
+
+                addEntry(
+                    "project:audio:" + std::to_string(block->clipId),
+                    "Audio",
+                    block->label,
+                    trackName + " | Start " + std::to_string(block->startCell + 1) +
+                        " | Length " + std::to_string(block->lengthCells) + " cells",
+                    {},
+                    block->selected,
+                    1,
+                    false,
+                    false,
+                    false);
+            }
+        }
     }
 
     if (workspaceModel_.browserEntries.empty())
@@ -409,7 +645,7 @@ void UI::rebuildPlaylistBlocks()
         block.clipId = item.itemId;
         block.trackId = item.trackId;
         block.lane = static_cast<int>(std::distance(visibleState_.project.tracks.begin(), trackIt));
-        block.startCell = clampValue(static_cast<int>(item.startTimeSeconds * 2.0 + 0.5), 0, kPlaylistCellCount - 2);
+        block.startCell = std::max(0, static_cast<int>(item.startTimeSeconds * 2.0 + 0.5));
         block.lengthCells = std::max(2, static_cast<int>(item.durationSeconds * 2.0 + 0.5));
         block.label = item.label.empty() ? ("Clip " + std::to_string(item.itemId)) : item.label;
         block.clipType = item.type == AudioEngine::PlaylistItemType::AudioClip ? "Audio" : "Pattern";
@@ -424,7 +660,7 @@ void UI::rebuildPlaylistBlocks()
         workspaceModel_.markers.push_back(
             PlaylistMarkerState{
                 marker.name,
-                clampValue(static_cast<int>(marker.timeSeconds * 2.0 + 0.5), 0, kPlaylistCellCount - 1)});
+                std::max(0, static_cast<int>(marker.timeSeconds * 2.0 + 0.5))});
     }
 }
 
@@ -646,24 +882,15 @@ void UI::paintMainBackground(HDC dc) const
     const int timePanelY = topPanelY + 12;
     const int timePanelWidth = 210;
     const int displayHeight = 50;
-    const int meterY = timePanelY + displayHeight + 8;
-    const int meterHeight = 34;
-    const int spectrumPanelX = timePanelX + timePanelWidth + 14;
-    const int spectrumPanelWidth = 140;
-    const int spectrumPanelHeight = displayHeight + meterHeight + 8;
-    const int transportX = spectrumPanelX + spectrumPanelWidth + 28;
+    const int transportX = timePanelX + timePanelWidth + 18;
     const int transportY = topPanelY + 18;
-    const int patternClusterWidth = 154;
+    const int patternClusterWidth = 484;
     const int clientRight = static_cast<int>(clientRect.right);
-    const int patternClusterLimit = clientRight - kOuterPadding - patternClusterWidth - 20;
-    const int patternClusterDesired = std::max(transportX + 372, clientRight - 460);
+    const int patternClusterLimit = std::max(kOuterPadding, clientRight - kOuterPadding - patternClusterWidth);
+    const int patternClusterDesired = std::max(transportX + 344, clientRight - patternClusterWidth - 28);
     const int patternClusterX = std::min(patternClusterLimit, patternClusterDesired);
 
-    RECT timeDisplayRect{timePanelX, timePanelY, timePanelX + timePanelWidth, timePanelY + displayHeight};
-    fillRectColor(dc, timeDisplayRect, RGB(83, 101, 103));
-    drawSurfaceFrame(dc, timeDisplayRect, RGB(73, 88, 91));
-
-    const int totalCentiseconds = std::max(0, static_cast<int>(visibleState_.timelineSeconds * 100.0 + 0.5));
+    const int totalCentiseconds = std::max(0, static_cast<int>(displayedTimelineSeconds() * 100.0 + 0.5));
     const int minutes = totalCentiseconds / 6000;
     const int seconds = (totalCentiseconds / 100) % 60;
     const int centiseconds = totalCentiseconds % 100;
@@ -701,148 +928,19 @@ void UI::paintMainBackground(HDC dc) const
         DEFAULT_PITCH | FF_SWISS,
         "Segoe UI");
     HGDIOBJ oldFont = SelectObject(dc, timeFont);
-    RECT timeValueRect{timeDisplayRect.left + 14, timeDisplayRect.top + 2, timeDisplayRect.right - 10, timeDisplayRect.bottom - 4};
-    SetTextColor(dc, RGB(230, 239, 241));
+    RECT timeValueRect{timePanelX, timePanelY + 2, timePanelX + timePanelWidth, timePanelY + displayHeight - 4};
+    SetTextColor(dc, RGB(226, 233, 236));
     DrawTextA(dc, timeBuffer, -1, &timeValueRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(dc, smallFont);
-    RECT timeModeRect{timeDisplayRect.right - 54, timeDisplayRect.top + 3, timeDisplayRect.right - 8, timeDisplayRect.top + 16};
-    SetTextColor(dc, RGB(210, 219, 223));
+    RECT timeModeRect{timePanelX + 136, timePanelY + 4, timePanelX + timePanelWidth, timePanelY + 16};
+    SetTextColor(dc, RGB(178, 188, 194));
     DrawTextA(dc, "M:S:CS", -1, &timeModeRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dc, oldFont);
 
-    RECT meterRect{timePanelX, meterY, timePanelX + timePanelWidth, meterY + meterHeight};
-    fillRectColor(dc, meterRect, RGB(62, 71, 76));
-    drawSurfaceFrame(dc, meterRect, RGB(58, 66, 70));
-
-    const double meterBase =
-        visibleState_.transportState == AudioEngine::TransportState::Playing
-            ? (0.40 + (0.26 * (0.5 + (0.5 * std::sin((visibleState_.timelineSeconds * 4.0) + 0.35)))))
-            : (0.34 + (visibleState_.cpuLoadApprox * 0.18));
-    const int meterFillWidth = clampValue(static_cast<int>((timePanelWidth - 14) * meterBase), 30, timePanelWidth - 20);
-    RECT meterFillTop{meterRect.left + 8, meterRect.top + 6, meterRect.left + 8 + meterFillWidth, meterRect.top + 16};
-    RECT meterFillBottom{meterRect.left + 8, meterRect.top + 18, meterRect.left + 8 + meterFillWidth, meterRect.top + 28};
-    fillRectColor(dc, meterFillTop, RGB(232, 228, 216));
-    fillRectColor(dc, meterFillBottom, RGB(232, 228, 216));
-    drawHorizontalLine(dc, meterFillTop.left, meterFillTop.right, meterRect.top + 17, RGB(201, 196, 183));
-
-    RECT spectrumRect{spectrumPanelX, timePanelY, spectrumPanelX + spectrumPanelWidth, timePanelY + spectrumPanelHeight};
-    fillRectColor(dc, spectrumRect, RGB(74, 86, 91));
-    drawSurfaceFrame(dc, spectrumRect, RGB(73, 88, 91));
-
-    RECT spectrumInnerRect{spectrumRect.left + 6, spectrumRect.top + 6, spectrumRect.right - 6, spectrumRect.bottom - 6};
-    fillRectColor(dc, spectrumInnerRect, RGB(62, 71, 75));
-    drawHorizontalLine(dc, spectrumInnerRect.left, spectrumInnerRect.right, spectrumInnerRect.bottom - 22, RGB(87, 99, 103));
-
-    POINT spectrumPoints[16]{};
-    const int spectrumWidth = spectrumInnerRect.right - spectrumInnerRect.left;
-    const int spectrumHeight = spectrumInnerRect.bottom - spectrumInnerRect.top;
-    const double motionBase =
-        visibleState_.transportState == AudioEngine::TransportState::Playing
-            ? visibleState_.timelineSeconds
-            : (static_cast<double>(visibleState_.callbackCount % 512) * 0.013);
-    spectrumPoints[0] = POINT{spectrumInnerRect.left, spectrumInnerRect.bottom};
-    for (int index = 0; index < 14; ++index)
-    {
-        const double phase = motionBase + static_cast<double>(index) * 0.41;
-        const double composite =
-            (0.45 + (0.28 * std::sin(phase * 1.3)) + (0.20 * std::sin((phase * 2.7) + 1.1))) *
-            (0.62 + (0.22 * std::sin((phase * 0.7) + 0.4)));
-        const int amplitude = clampValue(static_cast<int>(composite * static_cast<double>(spectrumHeight - 18)), 8, spectrumHeight - 16);
-        const int x = spectrumInnerRect.left + ((spectrumWidth - 1) * index) / 13;
-        const int y = spectrumInnerRect.bottom - 8 - amplitude;
-        spectrumPoints[index + 1] = POINT{x, y};
-    }
-    spectrumPoints[15] = POINT{spectrumInnerRect.right, spectrumInnerRect.bottom};
-
-    HBRUSH spectrumBrush = CreateSolidBrush(RGB(216, 222, 223));
-    HPEN spectrumPen = CreatePen(PS_SOLID, 1, RGB(216, 222, 223));
-    HGDIOBJ oldSpectrumBrush = SelectObject(dc, spectrumBrush);
-    HGDIOBJ oldSpectrumPen = SelectObject(dc, spectrumPen);
-    Polygon(dc, spectrumPoints, 16);
-    SelectObject(dc, oldSpectrumPen);
-    SelectObject(dc, oldSpectrumBrush);
-    DeleteObject(spectrumPen);
-    DeleteObject(spectrumBrush);
-
-    RECT transportShellRect{transportX + 58, transportY + 4, transportX + 158, transportY + 44};
-    HBRUSH transportShellBrush = CreateSolidBrush(kFlPanelDark);
-    HPEN transportShellPen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
-    HGDIOBJ oldTransportBrush = SelectObject(dc, transportShellBrush);
-    HGDIOBJ oldTransportPen = SelectObject(dc, transportShellPen);
-    RoundRect(dc, transportShellRect.left, transportShellRect.top, transportShellRect.right, transportShellRect.bottom, 18, 18);
-    SelectObject(dc, oldTransportPen);
-    SelectObject(dc, oldTransportBrush);
-    DeleteObject(transportShellPen);
-    DeleteObject(transportShellBrush);
-
-    RECT tempoFieldRect{
-        transportX + 208,
-        transportY + 4,
-        transportX + 208 + kTempoDisplayWidth,
-        transportY + 4 + kTempoDisplayHeight};
-    fillRectColor(dc, tempoFieldRect, kFlLcdFill);
-    drawSurfaceFrame(dc, tempoFieldRect, kFlLcdBorder);
-
-    RECT chronoFieldRect{
-        tempoFieldRect.right + kChronometerGap,
-        tempoFieldRect.top,
-        tempoFieldRect.right + kChronometerGap + kChronometerWidth,
-        tempoFieldRect.top + kChronometerHeight};
-    fillRectColor(dc, chronoFieldRect, workspace_.chronometerEnabled ? RGB(235, 175, 104) : RGB(107, 115, 118));
-    drawSurfaceFrame(dc, chronoFieldRect, workspace_.chronometerEnabled ? RGB(193, 118, 53) : kFlToolbarBorder);
-
-    RECT patternFieldRect{patternClusterX + 34, transportY + 2, patternClusterX + 90, transportY + 42};
+    RECT patternFieldRect{patternClusterX + 26, transportY + 6, patternClusterX + 136, transportY + 40};
     fillRectColor(dc, patternFieldRect, RGB(209, 222, 228));
     drawSurfaceFrame(dc, patternFieldRect, RGB(184, 196, 201));
-
-    const int modeBarLeft = transportX - 2;
-    const int modeBarTop = transportY + 68;
-    const int modeBarWidth = std::max(160, std::min(332, patternClusterX - transportX - 40));
-    const double playbackProgress = getPlaybackProgressNormalized();
-    const bool transportRunning = visibleState_.transportState == AudioEngine::TransportState::Playing;
-    const double beatPosition = std::fmod(std::max(0.0, visibleState_.timelineSeconds) * (workspace_.tempoBpm / 60.0), 1.0);
-    const int pulseStrength =
-        workspace_.chronometerEnabled && transportRunning && beatPosition < 0.15
-            ? clampValue(static_cast<int>(((0.15 - beatPosition) / 0.15) * 10.0), 0, 10)
-            : 0;
-    RECT modeLineRect{modeBarLeft + 18, modeBarTop + 7, modeBarLeft + modeBarWidth, modeBarTop + 9};
-    fillRectColor(dc, modeLineRect, RGB(128, 137, 141));
-    const int knobCenterX =
-        modeLineRect.left +
-        clampValue(
-            static_cast<int>(std::round(playbackProgress * static_cast<double>(modeLineRect.right - modeLineRect.left))),
-            0,
-            modeLineRect.right - modeLineRect.left);
-    RECT modeFillRect{
-        modeLineRect.left,
-        modeLineRect.top,
-        knobCenterX,
-        modeLineRect.bottom};
-    fillRectColor(
-        dc,
-        modeFillRect,
-        workspace_.songMode
-            ? blendColor(kFlToolbarBase, RGB(160, 171, 175), pulseStrength, 10)
-            : blendColor(kFlOrangeDeep, RGB(255, 202, 126), pulseStrength, 10));
-
-    RECT knobRect{
-        knobCenterX - 9,
-        modeBarTop,
-        knobCenterX + 9,
-        modeBarTop + 18};
-    drawFilledCircle(
-        dc,
-        knobRect,
-        blendColor(kFlPanelDark, RGB(120, 129, 133), pulseStrength, 10),
-        kFlPanelDarker);
-    RECT knobHighlight{knobRect.left + 6, knobRect.top + 4, knobRect.left + 10, knobRect.top + 12};
-    fillRectColor(
-        dc,
-        knobHighlight,
-        workspace_.songMode
-            ? blendColor(kFlToolbarBase, RGB(214, 221, 223), pulseStrength, 10)
-            : blendColor(kFlOrangeDeep, RGB(255, 205, 142), pulseStrength, 10));
 }
 
 HBRUSH UI::resolveLabelBrush(HWND control, HDC dc) const
@@ -928,7 +1026,16 @@ bool UI::isControlActive(WORD controlId) const
         return workspace_.chronometerEnabled;
 
     case IdButtonPatSong:
+        return !workspace_.songMode;
+
+    case IdButtonSongMode:
         return workspace_.songMode;
+
+    case IdButtonPlaylistToolPrev:
+        return workspace_.playlistTool == EditorTool::Draw;
+
+    case IdButtonPlaylistToolNext:
+        return workspace_.playlistTool == EditorTool::Slice;
 
     case IdButtonBrowser:
         return workspace_.browserVisible;
@@ -983,9 +1090,15 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
     const bool isTransportButton =
         controlId == IdButtonPlay ||
         controlId == IdButtonStopTransport;
+    const bool isModeButton =
+        controlId == IdButtonPatSong ||
+        controlId == IdButtonSongMode;
     const bool isPatternNavButton =
         controlId == IdButtonPatternPrev ||
         controlId == IdButtonPatternNext;
+    const bool isPlaylistToolButton =
+        controlId == IdButtonPlaylistToolPrev ||
+        controlId == IdButtonPlaylistToolNext;
     const bool isLegacyToggle =
         controlId == IdCheckboxAutomation ||
         controlId == IdCheckboxPdc ||
@@ -1014,36 +1127,32 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         return true;
     }
 
-    if (controlId == IdButtonPatSong)
+    if (isModeButton)
     {
-        HBRUSH shellBrush = CreateSolidBrush(kFlPanelDark);
-        HPEN shellPen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
-        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, shellBrush);
-        HGDIOBJ oldPen = SelectObject(drawItem.hDC, shellPen);
-        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 14, 14);
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
+        const COLORREF fillColor =
+            active
+                ? blendColor(kFlOrangeDeep, RGB(255, 190, 110), pressed ? 3 : 2, 6)
+                : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark);
+        HBRUSH brush = CreateSolidBrush(fillColor);
+        HPEN pen = CreatePen(PS_SOLID, 1, active ? RGB(188, 118, 56) : kFlPanelDarker);
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 16, 16);
         SelectObject(drawItem.hDC, oldPen);
         SelectObject(drawItem.hDC, oldBrush);
-        DeleteObject(shellPen);
-        DeleteObject(shellBrush);
-
-        RECT patRect{rect.left + 2, rect.top + 2, rect.right - 2, rect.top + ((rect.bottom - rect.top) / 2)};
-        RECT songRect{rect.left + 2, patRect.bottom, rect.right - 2, rect.bottom - 2};
-        const bool patternActive = !workspace_.songMode;
-        fillRectColor(drawItem.hDC, patRect, patternActive ? kFlOrange : kFlPanelDarker);
-        fillRectColor(drawItem.hDC, songRect, workspace_.songMode ? kFlOrange : kFlPanelDarker);
-        drawHorizontalLine(drawItem.hDC, patRect.left, patRect.right, patRect.bottom, RGB(55, 62, 66));
-
+        DeleteObject(pen);
+        DeleteObject(brush);
         oldFont = SelectObject(drawItem.hDC, smallBoldFont);
-        SetTextColor(drawItem.hDC, patternActive ? RGB(65, 51, 37) : RGB(147, 156, 160));
-        DrawTextA(drawItem.hDC, "PAT", -1, &patRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SetTextColor(drawItem.hDC, workspace_.songMode ? RGB(65, 51, 37) : RGB(147, 156, 160));
-        DrawTextA(drawItem.hDC, "SONG", -1, &songRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(drawItem.hDC, active ? RGB(66, 46, 27) : RGB(225, 232, 235));
+        DrawTextA(drawItem.hDC, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(drawItem.hDC, oldFont);
         return true;
     }
 
     if (isTransportButton)
     {
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         COLORREF buttonFill = pressed ? kFlPanelDarker : kFlPanelDark;
         HBRUSH brush = CreateSolidBrush(buttonFill);
         HPEN pen = CreatePen(PS_SOLID, 1, kFlPanelDarker);
@@ -1076,10 +1185,11 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
 
     if (controlId == IdButtonChronometer)
     {
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         const bool pulsing =
             workspace_.chronometerEnabled &&
             visibleState_.transportState == AudioEngine::TransportState::Playing;
-        const double beatPhase = std::fmod(std::max(0.0, visibleState_.timelineSeconds) * (workspace_.tempoBpm / 60.0), 1.0);
+        const double beatPhase = std::fmod(std::max(0.0, displayedTimelineSeconds()) * (workspace_.tempoBpm / 60.0), 1.0);
         const int pulseStrength =
             pulsing && beatPhase < 0.15
                 ? clampValue(static_cast<int>(((0.15 - beatPhase) / 0.15) * 10.0), 0, 10)
@@ -1116,6 +1226,7 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
 
     if (controlId == IdButtonTempoDisplay)
     {
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
         HBRUSH fieldBrush = CreateSolidBrush(kFlLcdFill);
         HPEN fieldPen = CreatePen(PS_SOLID, 1, active ? kFlOrangeDeep : kFlLcdBorder);
         HGDIOBJ oldBrush = SelectObject(drawItem.hDC, fieldBrush);
@@ -1177,16 +1288,21 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
 
     if (isPatternNavButton)
     {
-        fillRectColor(drawItem.hDC, rect, pressed ? RGB(52, 60, 66) : RGB(62, 71, 77));
-        drawSurfaceFrame(drawItem.hDC, rect, RGB(50, 58, 63));
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
+        const COLORREF fillColor =
+            controlId == IdButtonPatternPrev
+                ? (pressed ? blendColor(kFlOrangeDeep, RGB(248, 186, 108), 1, 2) : blendColor(kFlOrangeDeep, RGB(255, 199, 130), 1, 4))
+                : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark);
+        fillRectColor(drawItem.hDC, rect, fillColor);
+        drawSurfaceFrame(drawItem.hDC, rect, controlId == IdButtonPatternPrev ? RGB(160, 96, 42) : kFlPanelDarker);
         if (controlId == IdButtonPatternPrev)
         {
             POINT arrow[3]{
-                POINT{rect.left + 20, rect.top + 10},
-                POINT{rect.left + 12, rect.top + ((rect.bottom - rect.top) / 2)},
-                POINT{rect.left + 20, rect.bottom - 10}};
-            HBRUSH arrowBrush = CreateSolidBrush(RGB(225, 232, 235));
-            HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(225, 232, 235));
+                POINT{rect.left + 7, rect.top + 12},
+                POINT{rect.left + 17, rect.top + 12},
+                POINT{rect.left + 12, rect.bottom - 10}};
+            HBRUSH arrowBrush = CreateSolidBrush(RGB(95, 51, 15));
+            HPEN arrowPen = CreatePen(PS_SOLID, 1, RGB(95, 51, 15));
             HGDIOBJ oldArrowBrush = SelectObject(drawItem.hDC, arrowBrush);
             HGDIOBJ oldArrowPen = SelectObject(drawItem.hDC, arrowPen);
             Polygon(drawItem.hDC, arrow, 3);
@@ -1197,8 +1313,8 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         }
         else
         {
-            drawHorizontalLine(drawItem.hDC, rect.left + 10, rect.right - 10, rect.top + ((rect.bottom - rect.top) / 2), RGB(225, 232, 235));
-            drawVerticalLine(drawItem.hDC, rect.left + ((rect.right - rect.left) / 2), rect.top + 10, rect.bottom - 10, RGB(225, 232, 235));
+            drawHorizontalLine(drawItem.hDC, rect.left + 7, rect.right - 7, rect.top + ((rect.bottom - rect.top) / 2), RGB(225, 232, 235));
+            drawVerticalLine(drawItem.hDC, rect.left + ((rect.right - rect.left) / 2), rect.top + 8, rect.bottom - 8, RGB(225, 232, 235));
         }
         return true;
     }
@@ -1211,7 +1327,30 @@ bool UI::drawThemedButton(const DRAWITEMSTRUCT& drawItem) const
         oldFont = SelectObject(drawItem.hDC, moduleFont);
         SetTextColor(drawItem.hDC, disabled ? RGB(118, 126, 132) : RGB(227, 234, 237));
         RECT textRect{rect.left + 4, rect.top + 4, rect.right - 4, rect.bottom - 4};
-        DrawTextA(drawItem.hDC, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+        DrawTextA(drawItem.hDC, label, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(drawItem.hDC, oldFont);
+        return true;
+    }
+
+    if (isPlaylistToolButton)
+    {
+        fillRectColor(drawItem.hDC, rect, kFlToolbarBase);
+        const COLORREF fillColor =
+            active
+                ? blendColor(kUiPetrol, kUiLime, 1, 6)
+                : (pressed ? blendColor(kFlPanelDark, kUiShadow, 1, 2) : kFlPanelDark);
+        HBRUSH brush = CreateSolidBrush(fillColor);
+        HPEN pen = CreatePen(PS_SOLID, 1, active ? blendColor(kUiLime, kUiLine, 1, 3) : kFlPanelDarker);
+        HGDIOBJ oldBrush = SelectObject(drawItem.hDC, brush);
+        HGDIOBJ oldPen = SelectObject(drawItem.hDC, pen);
+        RoundRect(drawItem.hDC, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
+        SelectObject(drawItem.hDC, oldPen);
+        SelectObject(drawItem.hDC, oldBrush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+        oldFont = SelectObject(drawItem.hDC, smallBoldFont);
+        SetTextColor(drawItem.hDC, active ? RGB(223, 236, 226) : RGB(225, 232, 235));
+        DrawTextA(drawItem.hDC, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(drawItem.hDC, oldFont);
         return true;
     }
@@ -1286,11 +1425,9 @@ std::string UI::browserDropTargetLabel() const
 {
     if (workspaceModel_.browserEntries.empty())
     {
-        return "Rack / Playlist / Mixer";
+        return "Project";
     }
 
     const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(workspaceModel_.selectedBrowserIndex)];
-    return entry.label + " -> Rack / Playlist / Mixer";
+    return entry.label;
 }
-
-
