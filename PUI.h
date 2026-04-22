@@ -73,6 +73,7 @@ public:
         double pan = 0.0;
         bool muted = false;
         bool solo = false;
+        std::uint32_t outputBusId = 0;
         std::vector<std::uint32_t> inputTrackIds;
     };
 
