@@ -124,17 +124,48 @@ namespace
         return quoted;
     }
 
+    int hexDigitValue(char character)
+    {
+        if (character >= '0' && character <= '9')
+        {
+            return character - '0';
+        }
+        if (character >= 'a' && character <= 'f')
+        {
+            return 10 + (character - 'a');
+        }
+        if (character >= 'A' && character <= 'F')
+        {
+            return 10 + (character - 'A');
+        }
+        return -1;
+    }
+
     std::vector<std::string> splitString(const std::string& text, char delimiter)
     {
-        std::vector<std::string> parts;
-        std::stringstream stream(text);
-        std::string item;
-
-        while (std::getline(stream, item, delimiter))
+        if (text.empty())
         {
-            parts.push_back(item);
+            return {};
         }
 
+        std::vector<std::string> parts;
+        std::string item;
+        item.reserve(text.size());
+
+        for (const char character : text)
+        {
+            if (character == delimiter)
+            {
+                parts.push_back(item);
+                item.clear();
+            }
+            else
+            {
+                item.push_back(character);
+            }
+        }
+
+        parts.push_back(item);
         return parts;
     }
 
@@ -150,6 +181,88 @@ namespace
             stream << values[index];
         }
         return stream.str();
+    }
+
+    std::string encodeProjectToken(const std::string& text, char delimiter)
+    {
+        static constexpr char kHexDigits[] = "0123456789ABCDEF";
+
+        std::string encoded;
+        encoded.reserve(text.size());
+
+        for (const unsigned char value : text)
+        {
+            const bool mustEscape =
+                value == static_cast<unsigned char>('%') ||
+                value == static_cast<unsigned char>(delimiter) ||
+                value == static_cast<unsigned char>('\r') ||
+                value == static_cast<unsigned char>('\n');
+
+            if (!mustEscape)
+            {
+                encoded.push_back(static_cast<char>(value));
+                continue;
+            }
+
+            encoded.push_back('%');
+            encoded.push_back(kHexDigits[(value >> 4) & 0x0F]);
+            encoded.push_back(kHexDigits[value & 0x0F]);
+        }
+
+        return encoded;
+    }
+
+    std::string decodeProjectToken(const std::string& text)
+    {
+        std::string decoded;
+        decoded.reserve(text.size());
+
+        for (std::size_t index = 0; index < text.size(); ++index)
+        {
+            if (text[index] == '%' && (index + 2) < text.size())
+            {
+                const int highNibble = hexDigitValue(text[index + 1]);
+                const int lowNibble = hexDigitValue(text[index + 2]);
+                if (highNibble >= 0 && lowNibble >= 0)
+                {
+                    decoded.push_back(static_cast<char>((highNibble << 4) | lowNibble));
+                    index += 2;
+                    continue;
+                }
+            }
+
+            decoded.push_back(text[index]);
+        }
+
+        return decoded;
+    }
+
+    std::string encodeProjectStringList(const std::vector<std::string>& values, char delimiter)
+    {
+        std::vector<std::string> encodedValues;
+        encodedValues.reserve(values.size());
+
+        for (const auto& value : values)
+        {
+            encodedValues.push_back(encodeProjectToken(value, delimiter));
+        }
+
+        return joinString(encodedValues, delimiter);
+    }
+
+    std::vector<std::string> decodeProjectStringList(const std::string& text, char delimiter)
+    {
+        if (text.empty())
+        {
+            return {};
+        }
+
+        std::vector<std::string> values = splitString(text, delimiter);
+        for (auto& value : values)
+        {
+            value = decodeProjectToken(value);
+        }
+        return values;
     }
 
     bool parseBoolToken(const std::string& text)
@@ -1720,6 +1833,110 @@ bool AudioEngine::addPattern(const std::string& name)
     return true;
 }
 
+bool AudioEngine::clonePattern(int patternNumber)
+{
+    const PatternState* sourcePattern = findPatternState(patternNumber);
+    if (sourcePattern == nullptr)
+    {
+        setError(kErrorProjectIo, "Pattern not found while cloning pattern.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+
+    int nextPatternNumber = 1;
+    for (const auto& pattern : projectState_.patterns)
+    {
+        nextPatternNumber = std::max(nextPatternNumber, pattern.patternNumber + 1);
+    }
+
+    PatternState duplicatedPattern = *sourcePattern;
+    duplicatedPattern.patternNumber = nextPatternNumber;
+    duplicatedPattern.name =
+        sourcePattern->name.empty()
+            ? ("Pattern " + std::to_string(nextPatternNumber))
+            : (sourcePattern->name + " Copy");
+    projectState_.patterns.push_back(std::move(duplicatedPattern));
+    synchronizeProjectMusicalState();
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Clone pattern", beforeState);
+    publishSnapshot();
+    return true;
+}
+
+bool AudioEngine::deletePattern(int patternNumber)
+{
+    auto patternIt = std::find_if(
+        projectState_.patterns.begin(),
+        projectState_.patterns.end(),
+        [&](const PatternState& pattern) { return pattern.patternNumber == patternNumber; });
+    if (patternIt == projectState_.patterns.end())
+    {
+        setError(kErrorProjectIo, "Pattern not found while deleting pattern.");
+        return false;
+    }
+
+    if (projectState_.patterns.size() <= 1)
+    {
+        setError(kErrorProjectIo, "Cannot delete the last remaining pattern.");
+        return false;
+    }
+
+    const ProjectState beforeState = projectState_;
+    std::vector<std::uint32_t> removedPlaylistItemIds;
+
+    for (const auto& item : projectState_.playlistItems)
+    {
+        if (item.type == PlaylistItemType::PatternClip && item.patternNumber == patternNumber)
+        {
+            removedPlaylistItemIds.push_back(item.itemId);
+        }
+    }
+
+    for (auto& track : projectState_.tracks)
+    {
+        track.clipIds.erase(
+            std::remove_if(
+                track.clipIds.begin(),
+                track.clipIds.end(),
+                [&](std::uint32_t itemId)
+                {
+                    return std::find(removedPlaylistItemIds.begin(), removedPlaylistItemIds.end(), itemId) != removedPlaylistItemIds.end();
+                }),
+            track.clipIds.end());
+    }
+
+    projectState_.playlistItems.erase(
+        std::remove_if(
+            projectState_.playlistItems.begin(),
+            projectState_.playlistItems.end(),
+            [&](const PlaylistItemState& item)
+            {
+                return item.type == PlaylistItemType::PatternClip && item.patternNumber == patternNumber;
+            }),
+        projectState_.playlistItems.end());
+
+    projectState_.clips.erase(
+        std::remove_if(
+            projectState_.clips.begin(),
+            projectState_.clips.end(),
+            [&](const ClipState& clip)
+            {
+                return clip.patternNumber == patternNumber;
+            }),
+        projectState_.clips.end());
+
+    projectState_.patterns.erase(patternIt);
+    synchronizeProjectMusicalState();
+    projectState_.dirty = true;
+    ++projectState_.revision;
+    pushUndoState("Delete pattern", beforeState);
+    requestGraphRebuild();
+    publishSnapshot();
+    return true;
+}
+
 bool AudioEngine::addTrack(const std::string& name)
 {
     const ProjectState beforeState = projectState_;
@@ -1925,7 +2142,11 @@ bool AudioEngine::setAutomationPoint(std::uint32_t clipId, int pointIndex, int c
     return true;
 }
 
-bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipName)
+bool AudioEngine::addClipToTrack(
+    std::uint32_t trackId,
+    const std::string& clipName,
+    double startTimeSeconds,
+    double durationSeconds)
 {
     auto trackIt = std::find_if(
         projectState_.tracks.begin(),
@@ -1956,11 +2177,21 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     clip.sourceType = audioClipRequest ? ClipSourceType::AudioFile : ClipSourceType::GeneratedTone;
     clip.filePath = audioClipRequest ? clipName : "";
     clip.patternNumber = patternNumber;
-    clip.startTimeSeconds = 0.0;
+    clip.startTimeSeconds = std::max(0.0, startTimeSeconds);
     clip.durationSeconds = 4.0;
     clip.gain = 0.8;
     clip.loopEnabled = !audioClipRequest;
     clip.timeStretchEnabled = true;
+
+    if (!audioClipRequest)
+    {
+        const PatternState* pattern = findPatternState(patternNumber);
+        if (pattern != nullptr)
+        {
+            const double beats = static_cast<double>(std::max(1, pattern->lengthInBars)) * 4.0;
+            clip.durationSeconds = std::max(0.5, (beats * 60.0) / std::max(1.0, transportInfo_.tempoBpm));
+        }
+    }
 
     if (audioClipRequest)
     {
@@ -1971,6 +2202,11 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
         }
     }
 
+    if (durationSeconds > 0.0)
+    {
+        clip.durationSeconds = std::max(0.125, durationSeconds);
+    }
+
     PlaylistItemState item{};
     item.itemId = nextPlaylistItemId();
     item.trackId = trackId;
@@ -1978,8 +2214,8 @@ bool AudioEngine::addClipToTrack(std::uint32_t trackId, const std::string& clipN
     item.sourceClipId = clip.clipId;
     item.patternNumber = patternNumber;
     item.label = audioClipRequest ? clip.name : ("Pattern " + std::to_string(std::max(1, patternNumber)));
-    item.startTimeSeconds = 0.0;
-    item.durationSeconds = std::max(2.0, clip.durationSeconds);
+    item.startTimeSeconds = clip.startTimeSeconds;
+    item.durationSeconds = std::max(0.125, clip.durationSeconds);
     item.gain = clip.gain;
     item.pan = clip.pan;
     item.pitchSemitones = clip.pitchSemitones;
