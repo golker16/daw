@@ -306,11 +306,16 @@ UI::UI(HINSTANCE hInstance, int nCmdShow, AudioEngine& engine)
         {WorkspacePane::Mixer, {}, false, true, "Mixer"},
         {WorkspacePane::Plugin, {}, false, true, "Plugin"}};
     detachPane(WorkspacePane::ChannelRack);
+    detachPane(WorkspacePane::PianoRoll);
     detachPane(WorkspacePane::Mixer);
 
     if (DockedPaneState* channelRackPane = findDockedPane(WorkspacePane::ChannelRack))
     {
         channelRackPane->bounds = RECT{120, 120, 700, 670};
+    }
+    if (DockedPaneState* pianoRollPane = findDockedPane(WorkspacePane::PianoRoll))
+    {
+        pianoRollPane->bounds = RECT{160, 120, 1280, 760};
     }
     if (DockedPaneState* mixerPane = findDockedPane(WorkspacePane::Mixer))
     {
@@ -1214,7 +1219,11 @@ void UI::layoutControls()
     workspace_.playlistVisible = true;
     ShowWindow(playlistPanel_, SW_SHOW);
 
-    const int lowerDockCount = (workspace_.pianoRollVisible ? 1 : 0) + (workspace_.pluginVisible ? 1 : 0);
+    const bool pianoRollDetached =
+        findDockedPane(WorkspacePane::PianoRoll) != nullptr &&
+        findDockedPane(WorkspacePane::PianoRoll)->detached;
+    const bool pianoRollDockedVisible = workspace_.pianoRollVisible && !pianoRollDetached;
+    const int lowerDockCount = (pianoRollDockedVisible ? 1 : 0) + (workspace_.pluginVisible ? 1 : 0);
     const int lowerDockHeight = lowerDockCount == 0 ? 0 : (lowerDockCount == 1 ? 190 : 220);
     const int playlistHeight =
         std::max(160, workspaceHeight - (lowerDockHeight > 0 ? lowerDockHeight + kGap : 0));
@@ -1226,9 +1235,9 @@ void UI::layoutControls()
     }
 
     const int lowerDockY = y + playlistHeight + (lowerDockHeight > 0 ? kGap : 0);
-    if (workspace_.pianoRollVisible || workspace_.pluginVisible)
+    if (pianoRollDockedVisible || workspace_.pluginVisible)
     {
-        if (workspace_.pianoRollVisible && workspace_.pluginVisible)
+        if (pianoRollDockedVisible && workspace_.pluginVisible)
         {
             const int pianoWidth = (workspaceWidth * 58) / 100;
             ShowWindow(pianoRollPanel_, SW_SHOW);
@@ -1236,7 +1245,7 @@ void UI::layoutControls()
             MoveWindow(pianoRollPanel_, workspaceX, lowerDockY, pianoWidth, lowerDockHeight, TRUE);
             MoveWindow(pluginPanel_, workspaceX + pianoWidth + kGap, lowerDockY, workspaceWidth - pianoWidth - kGap, lowerDockHeight, TRUE);
         }
-        else if (workspace_.pianoRollVisible)
+        else if (pianoRollDockedVisible)
         {
             ShowWindow(pianoRollPanel_, SW_SHOW);
             ShowWindow(pluginPanel_, SW_HIDE);
@@ -1260,13 +1269,13 @@ void UI::layoutControls()
         pane->bounds = RECT{
             workspaceX,
             lowerDockY,
-            workspaceX + (workspace_.pluginVisible && workspace_.pianoRollVisible ? (workspaceWidth * 58) / 100 : workspaceWidth),
+            workspaceX + (workspace_.pluginVisible && pianoRollDockedVisible ? (workspaceWidth * 58) / 100 : workspaceWidth),
             lowerDockY + lowerDockHeight};
     }
     if (DockedPaneState* pane = findDockedPane(WorkspacePane::Plugin))
     {
         pane->bounds = RECT{
-            workspace_.pluginVisible && workspace_.pianoRollVisible ? workspaceX + ((workspaceWidth * 58) / 100) + kGap : workspaceX,
+            workspace_.pluginVisible && pianoRollDockedVisible ? workspaceX + ((workspaceWidth * 58) / 100) + kGap : workspaceX,
             lowerDockY,
             workspaceX + workspaceWidth,
             lowerDockY + lowerDockHeight};
@@ -1327,6 +1336,11 @@ void UI::ensureDetachedWindows()
             ShowWindow(channelRackPanel_, pane->visible ? SW_SHOW : SW_HIDE);
             ShowWindow(stepSequencerPanel_, pane->visible ? SW_SHOW : SW_HIDE);
         }
+        else if (paneId == WorkspacePane::PianoRoll)
+        {
+            SetParent(pianoRollPanel_, pane->windowHandle);
+            ShowWindow(pianoRollPanel_, pane->visible ? SW_SHOW : SW_HIDE);
+        }
         else if (paneId == WorkspacePane::Mixer)
         {
             SetParent(mixerPanel_, pane->windowHandle);
@@ -1342,6 +1356,7 @@ void UI::ensureDetachedWindows()
     };
 
     ensureDetachedPane(WorkspacePane::ChannelRack, 560, 540);
+    ensureDetachedPane(WorkspacePane::PianoRoll, 1120, 640);
     ensureDetachedPane(WorkspacePane::Mixer, 1080, 420);
 }
 
@@ -1575,6 +1590,10 @@ void UI::layoutDetachedPaneWindow(DockedPaneState& pane)
         MoveWindow(channelRackPanel_, 0, 0, width, topHeight, TRUE);
         MoveWindow(stepSequencerPanel_, 0, topHeight + kDetachedPaneGap, width, std::max(120, height - topHeight - kDetachedPaneGap), TRUE);
     }
+    else if (pane.pane == WorkspacePane::PianoRoll)
+    {
+        MoveWindow(pianoRollPanel_, 0, 0, width, height, TRUE);
+    }
     else if (pane.pane == WorkspacePane::Mixer)
     {
         MoveWindow(mixerPanel_, 0, 0, width, height, TRUE);
@@ -1674,8 +1693,22 @@ UI::VisibleEngineState UI::buildVisibleEngineState() const
 
     for (const auto& bus : engineSnapshot.project.state.buses)
     {
-        snapshot.project.buses.push_back(VisibleBus{bus.busId, bus.name, bus.inputTrackIds});
+        VisibleBus visibleBus{};
+        visibleBus.busId = bus.busId;
+        visibleBus.name = bus.name;
+        visibleBus.gain = bus.gain;
+        visibleBus.pan = bus.pan;
+        visibleBus.muted = bus.muted;
+        visibleBus.solo = bus.solo;
+        visibleBus.inputTrackIds = bus.inputTrackIds;
+        snapshot.project.buses.push_back(std::move(visibleBus));
     }
+
+    snapshot.project.playlistItems = engineSnapshot.project.state.playlistItems;
+    snapshot.project.markers = engineSnapshot.project.state.markers;
+    snapshot.project.patterns = engineSnapshot.project.state.patterns;
+    snapshot.project.channelSettings = engineSnapshot.project.state.channelSettings;
+    snapshot.project.automationClips = engineSnapshot.project.state.automationClips;
 
     for (const auto& track : engineSnapshot.project.state.tracks)
     {
@@ -1686,21 +1719,31 @@ UI::VisibleEngineState UI::buildVisibleEngineState() const
         visibleTrack.armed = track.armed;
         visibleTrack.muted = track.muted;
         visibleTrack.solo = track.solo;
+        visibleTrack.gain = track.gain;
+        visibleTrack.pan = track.pan;
 
-        for (const auto& clip : engineSnapshot.project.state.clips)
+        for (const auto& item : engineSnapshot.project.state.playlistItems)
         {
-            if (clip.trackId != track.trackId)
+            if (item.trackId != track.trackId || item.type == AudioEngine::PlaylistItemType::AutomationClip)
             {
                 continue;
             }
 
-            visibleTrack.clips.push_back(VisibleClip{
-                clip.clipId,
-                clip.name,
-                clip.sourceType == AudioEngine::ClipSourceType::GeneratedTone ? "Pattern" : "Audio",
-                clip.startTimeSeconds,
-                clip.durationSeconds,
-                clip.muted});
+            VisibleClip visibleClip{};
+            visibleClip.clipId = item.itemId;
+            visibleClip.name = item.label;
+            visibleClip.sourceLabel = item.type == AudioEngine::PlaylistItemType::AudioClip ? "Audio" : "Pattern";
+            visibleClip.patternNumber = item.patternNumber;
+            visibleClip.startTimeSeconds = item.startTimeSeconds;
+            visibleClip.durationSeconds = item.durationSeconds;
+            visibleClip.trimStartSeconds = item.trimStartSeconds;
+            visibleClip.trimEndSeconds = item.trimEndSeconds;
+            visibleClip.fadeInSeconds = item.fadeInSeconds;
+            visibleClip.fadeOutSeconds = item.fadeOutSeconds;
+            visibleClip.gain = item.gain;
+            visibleClip.pan = item.pan;
+            visibleClip.muted = item.muted;
+            visibleTrack.clips.push_back(std::move(visibleClip));
         }
 
         snapshot.project.tracks.push_back(std::move(visibleTrack));
