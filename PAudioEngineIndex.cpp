@@ -13,14 +13,11 @@
  * 3. El motor procesa bloques live y anticipativos.
  * 4. La UI consume snapshots consistentes publicados por el engine.
  *
- * Expansion futura:
- * - Mantener este archivo corto.
- * - Agregar aqui AudioEngineDev2.cpp, AudioEngineDev3.cpp, etc.
- * - Reservar AudioEngineDev1.cpp para el bloque historico o core inicial.
+ * Organizacion actual:
+ * - PAudioEngineIndex.cpp incluye AudioEngineDev1.cpp.
+ * - AudioEngineDev1.cpp encadena AudioEngineDev2.cpp y AudioEngineDev3.cpp.
+ * - Asi mantenemos una sola unidad de compilacion y evitamos romper el build.
  */
 
 #include "PAudioEngineIndex.h"
 #include "AudioEngineDev1.cpp"
-// Add future engine modules here, for example:
-// #include "AudioEngineDev2.cpp"
-// #include "AudioEngineDev3.cpp"
