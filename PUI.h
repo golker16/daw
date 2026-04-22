@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -293,13 +294,17 @@ public:
 
     struct BrowserEntry
     {
+        std::string id;
         std::string category;
         std::string label;
         std::string subtitle;
+        std::string payloadPath;
         bool favorite = false;
         int indentLevel = 0;
         bool group = false;
         bool expanded = false;
+        bool draggable = false;
+        bool folder = false;
     };
 
     struct ChannelStepState
@@ -476,6 +481,9 @@ private:
     void requestTempoChange(double bpm);
     void requestAddTrack();
     void requestAddBus();
+    void requestAddPattern();
+    void requestDuplicatePattern();
+    void requestDeletePattern();
     void requestAddClip();
     void requestNewProject();
     void requestUndo();
@@ -485,8 +493,11 @@ private:
     void requestCreatePluginStub();
     void requestTogglePluginSandboxMode();
     void showMainMenuPopup(WORD commandId);
+    void showPatternSelectorPopup();
     void toggleChronometer();
+    void selectPatternByNumber(int patternNumber);
     void syncTransportLoopState();
+    double displayedTimelineSeconds() const;
     double getPatternPlaybackLengthSeconds() const;
     double getSongPlaybackLengthSeconds() const;
     double getPlaybackProgressNormalized() const;
@@ -556,6 +567,20 @@ private:
     std::string browserDropTargetLabel() const;
     void rebuildPlaylistVisuals(const RECT& rect);
     void rebuildPianoVisuals(const RECT& rect);
+    void updateBrowserScrollBar();
+    void updatePlaylistScrollBars();
+    void clampBrowserScroll();
+    void clampPlaylistScroll();
+    void scrollBrowserTo(int y);
+    void scrollPlaylistTo(int x, int y);
+    int playlistTrackLaneCount() const;
+    int playlistTotalCellCount() const;
+    int playlistColumnWidth(int availableWidth) const;
+    bool isBrowserGroupExpanded(const std::string& id) const;
+    void setBrowserGroupExpanded(const std::string& id, bool expanded);
+    void toggleBrowserGroup(const std::string& id);
+    void addSampleLibraryRoot(const std::string& path);
+    void handleBrowserDrop(WPARAM dropHandle);
     int clampValue(int value, int minValue, int maxValue) const;
     bool isPaneVisible(WorkspacePane pane) const;
     void setPaneVisible(WorkspacePane pane, bool visible);
@@ -574,7 +599,7 @@ private:
     static constexpr const char* kDetachedPaneClassName = "DAWCloudDetachedPaneClass";
     static constexpr const char* kWindowTitleBase = "DAW Cloud Template";
     static constexpr UINT_PTR kUiTimerId = 1;
-    static constexpr UINT kUiTimerIntervalMs = 50;
+    static constexpr UINT kUiTimerIntervalMs = 16;
 
     enum ControlId : WORD
     {
@@ -638,6 +663,7 @@ private:
         IdButtonMenuHelp = 1058,
         IdButtonTempoDisplay = 1059,
         IdButtonChronometer = 1060,
+        IdButtonSongMode = 1061,
 
         IdCheckboxAutomation = 1101,
         IdCheckboxPdc = 1102,
@@ -699,7 +725,10 @@ private:
         IdMenuToolsStopEngine = 2024,
         IdMenuToolsRebuildGraph = 2025,
         IdMenuToolsRenderOffline = 2026,
-        IdMenuHelpAbout = 2027
+        IdMenuHelpAbout = 2027,
+        IdMenuPatternsAdd = 2028,
+        IdMenuPatternsClone = 2029,
+        IdMenuPatternsDelete = 2030
     };
 
 private:
@@ -725,6 +754,7 @@ private:
     HWND stopTransportButton_ = nullptr;
     HWND recordButton_ = nullptr;
     HWND patSongButton_ = nullptr;
+    HWND songModeButton_ = nullptr;
     HWND chronoButton_ = nullptr;
     HWND tempoDownButton_ = nullptr;
     HWND tempoUpButton_ = nullptr;
@@ -815,6 +845,8 @@ private:
     WorkspaceState workspace_{};
     WorkspaceModel workspaceModel_{};
     std::size_t selectedTrackIndex_ = 0;
+    double displayedTimelineAnchorSeconds_ = 0.0;
+    std::chrono::steady_clock::time_point displayedTimelineAnchorClock_{};
     WNDPROC tempoControlProc_ = nullptr;
     WNDPROC tempoEditProc_ = nullptr;
     bool tempoDragActive_ = false;
@@ -823,11 +855,17 @@ private:
     POINT tempoDragOrigin_{};
     double tempoDragStartBpm_ = 120.0;
     double tempoDragLastAppliedBpm_ = 120.0;
+    int browserScrollY_ = 0;
+    int playlistScrollX_ = 0;
+    int playlistScrollY_ = 0;
+    std::vector<std::string> expandedBrowserGroupIds_{};
+    std::vector<std::string> sampleLibraryRoots_{};
     bool transportLoopStateInitialized_ = false;
     bool syncedLoopEnabled_ = false;
     std::uint64_t syncedLoopStartSample_ = 0;
     std::uint64_t syncedLoopEndSample_ = 0;
 };
+
 
 
 
