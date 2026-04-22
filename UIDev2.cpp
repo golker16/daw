@@ -790,7 +790,9 @@ std::string UI::paneTitle(WorkspacePane pane) const
     {
     case WorkspacePane::Browser: return "Browser";
     case WorkspacePane::ChannelRack: return "Channel Rack - Pattern " + std::to_string(workspace_.activePattern);
-    case WorkspacePane::PianoRoll: return "Piano Roll";
+    case WorkspacePane::PianoRoll:
+        return "Piano Roll - P" + std::to_string(workspace_.activePattern) +
+            " - " + (visibleState_.selection.selectedTrackName.empty() ? std::string("No Channel") : visibleState_.selection.selectedTrackName);
     case WorkspacePane::Playlist: return "Playlist";
     case WorkspacePane::Mixer: return "Mixer - " + (visibleState_.project.projectName.empty() ? std::string("Untitled Project") : visibleState_.project.projectName);
     case WorkspacePane::Plugin: return "Plugin";
@@ -1020,52 +1022,110 @@ void UI::paintStepSequencerSurface(HDC dc, const RECT& rect)
 
 void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Piano Roll", "Pattern melody editor");
+    const std::string channelName =
+        visibleState_.selection.selectedTrackName.empty()
+            ? std::string("No channel selected")
+            : visibleState_.selection.selectedTrackName;
+    const std::string subtitle =
+        "Pattern " + std::to_string(workspace_.activePattern) +
+        " | " + channelName +
+        " | Zoom " + currentZoomLabel(true) +
+        " | Tool " + currentToolLabel(true);
+    drawSurfaceHeader(dc, rect, "Piano Roll", subtitle);
+
     RECT drawRect = rect;
     drawRect.top += 24;
-    const int keyWidth = 48;
+    const int keyWidth = 72;
     const int laneHeight = 22;
     const int columns = kPlaylistCellCount;
     const int gridLeft = drawRect.left + keyWidth;
     const int gridTop = drawRect.top;
+    const int gridWidth = static_cast<int>(drawRect.right) - gridLeft;
+    const int stepWidth = std::max<int>(18, gridWidth / columns);
+    const int footerHeight = 28;
+    RECT pianoGridRect{gridLeft, gridTop, drawRect.right, drawRect.bottom - footerHeight};
+    const int laneCount = std::max<int>(1, (pianoGridRect.bottom - gridTop) / laneHeight);
+    fillRectColor(dc, pianoGridRect, RGB(30, 36, 44));
 
-    HBRUSH keyBrush = CreateSolidBrush(RGB(42, 45, 52));
-    RECT keyRect{drawRect.left, drawRect.top, drawRect.left + keyWidth, drawRect.bottom};
-    FillRect(dc, &keyRect, keyBrush);
-    DeleteObject(keyBrush);
+    static HFONT keyFont = CreateFontA(
+        11,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, keyFont);
 
-    HPEN majorPen = CreatePen(PS_SOLID, 1, RGB(68, 77, 90));
-    HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(48, 54, 64));
-
-    for (int lane = 0; lane < (drawRect.bottom - drawRect.top) / laneHeight; ++lane)
+    for (int lane = 0; lane < laneCount; ++lane)
     {
+        const int noteLane = (kPianoLaneCount - 1) - lane;
+        const int midiNote = 36 + std::max(0, noteLane);
+        const int noteClass = midiNote % 12;
+        const bool blackKey =
+            noteClass == 1 || noteClass == 3 || noteClass == 6 || noteClass == 8 || noteClass == 10;
+        const bool isC = noteClass == 0;
         const int y = gridTop + (lane * laneHeight);
-        SelectObject(dc, minorPen);
-        MoveToEx(dc, drawRect.left, y, nullptr);
-        LineTo(dc, drawRect.right, y);
+
+        RECT keyRect{drawRect.left, y, gridLeft, y + laneHeight};
+        RECT laneRect{gridLeft, y, drawRect.right, y + laneHeight};
+        fillRectColor(dc, keyRect, blackKey ? RGB(34, 39, 46) : RGB(222, 226, 229));
+        fillRectColor(
+            dc,
+            laneRect,
+            blackKey
+                ? RGB(36, 42, 51)
+                : (isC ? RGB(44, 51, 62) : RGB(40, 46, 56)));
+
+        if (isC)
+        {
+            RECT cAccent{drawRect.left, y, drawRect.left + 4, y + laneHeight};
+            fillRectColor(dc, cAccent, RGB(238, 164, 79));
+        }
+
+        SetTextColor(dc, blackKey ? RGB(210, 215, 219) : RGB(56, 63, 72));
+        RECT labelRect{drawRect.left + 10, y, gridLeft - 8, y + laneHeight};
+        DrawTextA(dc, noteLabelFromLane(noteLane).c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        drawHorizontalLine(dc, drawRect.left, drawRect.right, y, RGB(66, 74, 86));
     }
 
     for (int col = 0; col <= columns; ++col)
     {
-        const int gridWidth = static_cast<int>(drawRect.right) - gridLeft;
-        const int x = gridLeft + (col * std::max<int>(18, gridWidth / columns));
-        SelectObject(dc, (col % 4 == 0) ? majorPen : minorPen);
-        MoveToEx(dc, x, drawRect.top, nullptr);
-        LineTo(dc, x, drawRect.bottom);
+        const int x = gridLeft + (col * stepWidth);
+        const bool isBarLine = col % 4 == 0;
+        drawVerticalLine(dc, x, gridTop, pianoGridRect.bottom, isBarLine ? RGB(90, 106, 122) : RGB(56, 66, 78));
+
+        if (col < columns)
+        {
+            RECT topCellRect{x, gridTop, x + stepWidth, gridTop + 18};
+            SetTextColor(dc, isBarLine ? RGB(210, 215, 220) : RGB(150, 158, 167));
+            DrawTextA(dc, std::to_string(col + 1).c_str(), -1, &topCellRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 
-    DeleteObject(majorPen);
-    DeleteObject(minorPen);
+    RECT dividerRect{gridLeft - 1, gridTop, gridLeft + 1, pianoGridRect.bottom};
+    fillRectColor(dc, dividerRect, RGB(92, 101, 111));
 
     rebuildPianoVisuals(rect);
 
-    HBRUSH noteBrush = CreateSolidBrush(RGB(233, 153, 44));
-    HBRUSH selectedBrush = CreateSolidBrush(RGB(255, 214, 102));
+    HBRUSH noteBrush = CreateSolidBrush(RGB(232, 143, 36));
+    HBRUSH selectedBrush = CreateSolidBrush(RGB(255, 212, 112));
     for (std::size_t index = 0; index < interactionState_.pianoNoteVisuals.size(); ++index)
     {
         const auto& note = interactionState_.pianoNoteVisuals[index];
         RECT noteRect{note.rect.x, note.rect.y, note.rect.x + note.rect.width, note.rect.y + note.rect.height};
         FillRect(dc, &noteRect, note.selected ? selectedBrush : noteBrush);
+        drawSurfaceFrame(dc, noteRect, note.selected ? RGB(255, 240, 170) : RGB(188, 106, 26));
+        RECT velocityGlow{noteRect.left + 2, noteRect.top + 2, noteRect.right - 2, noteRect.top + 5};
+        fillRectColor(dc, velocityGlow, note.selected ? RGB(255, 236, 179) : RGB(255, 192, 120));
         RECT handleRect{noteRect.right - 5, noteRect.top, noteRect.right, noteRect.bottom};
         HBRUSH handleBrush = CreateSolidBrush(RGB(255, 235, 160));
         FillRect(dc, &handleRect, handleBrush);
@@ -1085,11 +1145,16 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
         DeleteObject(marqueePen);
     }
 
-    RECT textRect = drawRect;
-    textRect.left += 8;
-    textRect.top += 8;
-    SetTextColor(dc, RGB(235, 235, 235));
-    DrawTextA(dc, buildPianoRollPanelText().c_str(), -1, &textRect, DT_LEFT | DT_TOP);
+    RECT footerRect{drawRect.left, drawRect.bottom - footerHeight, drawRect.right, drawRect.bottom};
+    fillRectColor(dc, footerRect, RGB(26, 31, 38));
+    drawHorizontalLine(dc, footerRect.left, footerRect.right, footerRect.top, RGB(64, 74, 86));
+    SetTextColor(dc, RGB(214, 218, 222));
+    RECT footerTextRect{footerRect.left + 10, footerRect.top, footerRect.right - 10, footerRect.bottom};
+    const std::string footerText =
+        "Click to add notes, drag to move, drag the right edge to resize. Notes are now stored in the project and drive generated pattern clips.";
+    DrawTextA(dc, footerText.c_str(), -1, &footerTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(dc, oldFont);
     drawSurfaceFrame(dc, rect, RGB(88, 100, 118));
 }
 
@@ -1532,6 +1597,14 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             lane.steps[static_cast<std::size_t>(stepIndex)].velocity =
                 lane.steps[static_cast<std::size_t>(stepIndex)].enabled ? 108 : 0;
             workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)].lanes[static_cast<std::size_t>(laneIndex)] = lane;
+
+            AudioEngine::EngineCommand command{};
+            command.type = AudioEngine::CommandType::TogglePatternStep;
+            command.textValue =
+                std::to_string(workspace_.activePattern) + "|" +
+                std::to_string(lane.trackId) + "|" +
+                std::to_string(stepIndex);
+            engine_.postCommand(command);
         }
     }
 
@@ -1633,7 +1706,7 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int keyWidth = 48;
+        const int keyWidth = 72;
         const int laneHeight = 22;
         const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
         const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
@@ -1650,6 +1723,20 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
             .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
             .notes[interactionState_.selectedNoteIndex] = noteState;
+
+        AudioEngine::EngineCommand command{};
+        command.type = AudioEngine::CommandType::UpsertMidiNote;
+        command.textValue =
+            std::to_string(workspace_.activePattern) + "|" +
+            std::to_string(workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)].trackId) + "|" +
+            std::to_string(interactionState_.selectedNoteIndex) + "|" +
+            std::to_string(noteState.lane) + "|" +
+            std::to_string(noteState.step) + "|" +
+            std::to_string(noteState.length) + "|" +
+            std::to_string(noteState.velocity) + "|" +
+            (noteState.accent ? "1" : "0") + "|" +
+            (noteState.slide ? "1" : "0") + "|0";
+        engine_.postCommand(command);
     }
     else if (kind == SurfaceKind::PianoRoll && interactionState_.resizingNote &&
              interactionState_.selectedNoteIndex < interactionState_.pianoNoteVisuals.size() &&
@@ -1657,7 +1744,7 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int keyWidth = 48;
+        const int keyWidth = 72;
         const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
         const int stepWidth = std::max<int>(18, usableWidth / kPlaylistCellCount);
 
@@ -1669,6 +1756,20 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
             .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)]
             .notes[interactionState_.selectedNoteIndex] = noteState;
+
+        AudioEngine::EngineCommand command{};
+        command.type = AudioEngine::CommandType::UpsertMidiNote;
+        command.textValue =
+            std::to_string(workspace_.activePattern) + "|" +
+            std::to_string(workspaceModel_.patternLanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)].trackId) + "|" +
+            std::to_string(interactionState_.selectedNoteIndex) + "|" +
+            std::to_string(noteState.lane) + "|" +
+            std::to_string(noteState.step) + "|" +
+            std::to_string(noteState.length) + "|" +
+            std::to_string(noteState.velocity) + "|" +
+            (noteState.accent ? "1" : "0") + "|" +
+            (noteState.slide ? "1" : "0") + "|0";
+        engine_.postCommand(command);
     }
 
     if (kind == SurfaceKind::PianoRoll && !workspaceModel_.patternLanes.empty() &&
@@ -1677,7 +1778,7 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int keyWidth = 48;
+        const int keyWidth = 72;
         const int laneHeight = 22;
         const int gridTop = 24;
         const int usableWidth = std::max<int>(1, static_cast<int>(clientRect.right) - keyWidth);
@@ -1691,6 +1792,16 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             laneState.notes.push_back(PianoNoteState{lane, step, 2, 96, false, false, false});
             workspaceModel_.patterns[static_cast<std::size_t>(workspaceModel_.selectedPatternIndex)]
                 .lanes[static_cast<std::size_t>(workspaceModel_.activeChannelIndex)] = laneState;
+
+            AudioEngine::EngineCommand command{};
+            command.type = AudioEngine::CommandType::UpsertMidiNote;
+            command.textValue =
+                std::to_string(workspace_.activePattern) + "|" +
+                std::to_string(laneState.trackId) + "|" +
+                std::to_string(laneState.notes.size() - 1) + "|" +
+                std::to_string(lane) + "|" +
+                std::to_string(step) + "|2|96|0|0|1";
+            engine_.postCommand(command);
         }
     }
 
@@ -1761,6 +1872,10 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
 
             if (clipIt->clipId >= 4000)
             {
+                const auto playlistItemIt = std::find_if(
+                    visibleState_.project.playlistItems.begin(),
+                    visibleState_.project.playlistItems.end(),
+                    [&](const AudioEngine::PlaylistItemState& item) { return item.itemId == clipIt->clipId; });
                 for (auto& automation : workspaceModel_.automationLanes)
                 {
                     if (automation.clipId == clipIt->clipId)
@@ -1772,11 +1887,23 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                         break;
                     }
                 }
+
+                if (playlistItemIt != visibleState_.project.playlistItems.end())
+                {
+                    AudioEngine::EngineCommand command{};
+                    command.type = AudioEngine::CommandType::MoveClip;
+                    command.uintValue = clipIt->clipId;
+                    command.secondaryUintValue = playlistItemIt->trackId;
+                    command.doubleValue = static_cast<double>(targetStartCell) / 2.0;
+                    command.textValue = std::to_string(static_cast<double>(targetLengthCells) / 2.0);
+                    engine_.postCommand(command);
+                }
             }
             else
             {
                 const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
                 const double startTime = static_cast<double>(targetStartCell) / 2.0;
+                const double durationTime = static_cast<double>(targetLengthCells) / 2.0;
                 for (auto& block : workspaceModel_.playlistBlocks)
                 {
                     if (block.clipId == clipIt->clipId)
@@ -1793,9 +1920,32 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                 command.uintValue = clipIt->clipId;
                 command.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(safeLane)].trackId;
                 command.doubleValue = startTime;
+                command.textValue = std::to_string(durationTime);
                 engine_.postCommand(command);
             }
         }
+    }
+
+    if (kind == SurfaceKind::Playlist &&
+        interactionState_.editingAutomationPoint &&
+        interactionState_.selectedAutomationLaneIndex < workspaceModel_.automationLanes.size() &&
+        interactionState_.selectedAutomationPointIndex < workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex].values.size())
+    {
+        const auto& automation = workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex];
+        const int pointCount = static_cast<int>(automation.values.size());
+        const int pointIndex = static_cast<int>(interactionState_.selectedAutomationPointIndex);
+        const int cell =
+            automation.startCell +
+            (automation.lengthCells * pointIndex) / std::max(1, pointCount - 1);
+
+        AudioEngine::EngineCommand command{};
+        command.type = AudioEngine::CommandType::SetAutomationPoint;
+        command.textValue =
+            std::to_string(automation.clipId) + "|" +
+            std::to_string(pointIndex) + "|" +
+            std::to_string(cell) + "|" +
+            std::to_string(automation.values[interactionState_.selectedAutomationPointIndex]);
+        engine_.postCommand(command);
     }
 
     if (interactionState_.browserDragActive)
