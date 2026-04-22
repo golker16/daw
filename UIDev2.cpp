@@ -832,29 +832,39 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
 
     RECT rect{};
     GetClientRect(hwnd, &rect);
+    const int width = std::max(1, rectWidth(rect));
+    const int height = std::max(1, rectHeight(rect));
+
+    HDC bufferDc = CreateCompatibleDC(dc);
+    HBITMAP bufferBitmap = CreateCompatibleBitmap(dc, width, height);
+    HGDIOBJ oldBitmap = SelectObject(bufferDc, bufferBitmap);
 
     const COLORREF backgroundColor =
         kind == SurfaceKind::Browser ? blendColor(kUiGraphite, kUiShadow, 1, 5) :
         kind == SurfaceKind::Playlist ? blendColor(kUiPetrol, kUiShadow, 1, 5) :
         blendColor(kUiPetrol, kUiShadow, 1, 4);
-    fillRectColor(dc, rect, backgroundColor);
+    fillRectColor(bufferDc, rect, backgroundColor);
 
-    SetBkMode(dc, TRANSPARENT);
+    SetBkMode(bufferDc, TRANSPARENT);
 
     switch (kind)
     {
-    case SurfaceKind::Browser: paintBrowserSurface(dc, rect); break;
-    case SurfaceKind::ChannelRack: paintChannelRackSurface(dc, rect); break;
-    case SurfaceKind::StepSequencer: paintStepSequencerSurface(dc, rect); break;
-    case SurfaceKind::PianoRoll: paintPianoRollSurface(dc, rect); break;
-    case SurfaceKind::Playlist: paintPlaylistSurface(dc, rect); break;
-    case SurfaceKind::Mixer: paintMixerSurface(dc, rect); break;
-    case SurfaceKind::Plugin: paintPluginSurface(dc, rect); break;
+    case SurfaceKind::Browser: paintBrowserSurface(bufferDc, rect); break;
+    case SurfaceKind::ChannelRack: paintChannelRackSurface(bufferDc, rect); break;
+    case SurfaceKind::StepSequencer: paintStepSequencerSurface(bufferDc, rect); break;
+    case SurfaceKind::PianoRoll: paintPianoRollSurface(bufferDc, rect); break;
+    case SurfaceKind::Playlist: paintPlaylistSurface(bufferDc, rect); break;
+    case SurfaceKind::Mixer: paintMixerSurface(bufferDc, rect); break;
+    case SurfaceKind::Plugin: paintPluginSurface(bufferDc, rect); break;
     case SurfaceKind::None:
     default:
         break;
     }
 
+    BitBlt(dc, 0, 0, width, height, bufferDc, 0, 0, SRCCOPY);
+    SelectObject(bufferDc, oldBitmap);
+    DeleteObject(bufferBitmap);
+    DeleteDC(bufferDc);
     EndPaint(hwnd, &paintStruct);
 }
 
@@ -1154,60 +1164,51 @@ void UI::paintPianoRollSurface(HDC dc, const RECT& rect)
 
 void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 {
-    const std::string subtitle =
-        std::string(workspace_.songMode ? "Song arrangement" : "Pattern preview") +
-        " | Zoom " + currentZoomLabel(false) +
-        " | Tool " + currentToolLabel(false);
-    drawSurfaceHeader(dc, rect, "Playlist - Arrangement", subtitle);
-
+    const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(rect);
     const int laneHeight = kPlaylistLaneHeight;
-    const int timelineTop = rect.top + kSurfaceHeaderHeight;
-    const int timelineHeight = kPlaylistTimelineHeight;
-    const int gridTop = timelineTop + timelineHeight;
-    const int leftInset = kPlaylistTrackHeaderWidth;
-    const int visibleGridWidth = std::max<int>(1, static_cast<int>(rect.right - rect.left) - leftInset);
-    const int visibleGridHeight = std::max<int>(1, static_cast<int>(rect.bottom - gridTop));
     const int totalCells = playlistTotalCellCount();
-    const int columnWidth = playlistColumnWidth(visibleGridWidth);
+    const int columnWidth = playlistColumnWidth(metrics.visibleGridWidth);
     const int trackCount = playlistTrackLaneCount();
     const int laneCount =
         std::max(
             trackCount + 8,
             std::max(
                 kPlaylistMinVisibleTracks,
-                (playlistScrollY_ + visibleGridHeight + laneHeight - 1) / laneHeight + 1));
+                (playlistScrollY_ + metrics.visibleGridHeight + laneHeight - 1) / laneHeight + 1));
     const int firstVisibleCell = std::max(0, playlistScrollX_ / std::max(1, columnWidth));
-    const int visibleCellCount = (visibleGridWidth / std::max(1, columnWidth)) + 3;
+    const int visibleCellCount = (metrics.visibleGridWidth / std::max(1, columnWidth)) + 3;
     const int lastVisibleCell = std::min(totalCells, firstVisibleCell + visibleCellCount);
     const int firstVisibleLane = std::max(0, playlistScrollY_ / laneHeight);
-    const int visibleLaneCount = (visibleGridHeight / laneHeight) + 3;
+    const int visibleLaneCount = (metrics.visibleGridHeight / laneHeight) + 3;
     const int lastVisibleLane = std::min(laneCount, firstVisibleLane + visibleLaneCount);
+    const int contentWidth = std::max(metrics.visibleGridWidth, totalCells * columnWidth);
+    const int contentHeight = std::max(metrics.visibleGridHeight, playlistContentHeightForViewport(trackCount, metrics.visibleGridHeight));
+    const RECT horizontalThumb =
+        makeScrollbarThumbRect(metrics.horizontalScrollRect, contentWidth, metrics.visibleGridWidth, playlistScrollX_, true);
+    const RECT verticalThumb =
+        makeScrollbarThumbRect(metrics.verticalScrollRect, contentHeight, metrics.visibleGridHeight, playlistScrollY_, false);
 
-    RECT trackHeaderRect{rect.left, gridTop, rect.left + leftInset, rect.bottom};
-    fillRectColor(dc, trackHeaderRect, blendColor(kUiAnthracite, kUiShadow, 1, 5));
-
-    RECT timelineRect{rect.left + leftInset, timelineTop, rect.right, gridTop};
-    fillRectColor(dc, timelineRect, blendColor(kUiPetrol, kUiAnthracite, 1, 3));
-
-    RECT gutterRect{rect.left, timelineTop, rect.left + leftInset, gridTop};
-    fillRectColor(dc, gutterRect, kUiAnthracite);
-
-    RECT gridRect{rect.left + leftInset, gridTop, rect.right, rect.bottom};
-    fillRectColor(dc, gridRect, blendColor(kUiPetrol, kUiShadow, 1, 5));
+    fillRectColor(dc, metrics.headerRect, blendColor(kUiAnthracite, kUiPetrol, 1, 4));
+    drawHorizontalLine(dc, metrics.headerRect.left, metrics.headerRect.right, metrics.headerRect.bottom - 1, kUiLineSoft);
+    fillRectColor(dc, metrics.trackHeaderRect, blendColor(kUiAnthracite, kUiShadow, 1, 5));
+    fillRectColor(dc, metrics.timelineRect, blendColor(kUiPetrol, kUiAnthracite, 1, 3));
+    fillRectColor(dc, metrics.gutterRect, kUiAnthracite);
+    fillRectColor(dc, metrics.gridRect, blendColor(kUiPetrol, kUiShadow, 1, 5));
 
     for (int lane = firstVisibleLane; lane < lastVisibleLane; ++lane)
     {
-        const int y = gridTop + (lane * laneHeight) - playlistScrollY_;
+        const int y = metrics.gridRect.top + (lane * laneHeight) - playlistScrollY_;
         const bool isTrackLane = lane < trackCount;
         const bool laneSelected = isTrackLane && static_cast<std::size_t>(lane) == selectedTrackIndex_;
         const std::string laneName =
             isTrackLane
-                ? visibleState_.project.tracks[static_cast<std::size_t>(lane)].name
+                ? (visibleState_.project.tracks[static_cast<std::size_t>(lane)].name.empty()
+                    ? ("Track " + std::to_string(lane + 1))
+                    : visibleState_.project.tracks[static_cast<std::size_t>(lane)].name)
                 : ("Track " + std::to_string(lane + 1));
-        const std::string laneMeta = "Track " + std::to_string(lane + 1);
 
-        RECT laneRect{rect.left + leftInset, y, rect.right, y + laneHeight};
-        RECT headerLaneRect{rect.left, y, rect.left + leftInset, y + laneHeight};
+        RECT laneRect{metrics.gridRect.left, y, metrics.gridRect.right, y + laneHeight};
+        RECT headerLaneRect{rect.left, y, metrics.trackHeaderRect.right, y + laneHeight};
         fillRectColor(
             dc,
             laneRect,
@@ -1221,56 +1222,49 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
                 ? blendColor(kUiGraphite, kUiAnthracite, 1, 2)
                 : ((lane % 2) == 0 ? blendColor(kUiAnthracite, kUiShadow, 1, 5) : blendColor(kUiGraphite, kUiShadow, 1, 6)));
 
-        RECT metaRect{rect.left + 12, y + 4, rect.left + leftInset - 30, y + 15};
-        RECT labelRect{rect.left + 12, y + 15, rect.left + leftInset - 30, y + laneHeight - 4};
-        SetTextColor(dc, kUiTextDim);
-        DrawTextA(dc, laneMeta.c_str(), -1, &metaRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT labelRect{rect.left + 12, y + 7, metrics.trackHeaderRect.right - 30, y + laneHeight - 6};
         SetTextColor(dc, isTrackLane ? kUiText : kUiTextSoft);
         DrawTextA(dc, laneName.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         if (isTrackLane)
         {
-            RECT indicatorRect{rect.left + leftInset - 18, y + (laneHeight / 2) - 4, rect.left + leftInset - 10, y + (laneHeight / 2) + 4};
+            RECT indicatorRect{metrics.trackHeaderRect.right - 18, y + (laneHeight / 2) - 4, metrics.trackHeaderRect.right - 10, y + (laneHeight / 2) + 4};
             drawFilledCircle(dc, indicatorRect, laneSelected ? kUiLime : kUiLimeDim, blendColor(kUiLime, kUiShadow, 1, 3));
         }
 
-        drawHorizontalLine(dc, rect.left, rect.right, y, kUiLineSoft);
+        drawHorizontalLine(dc, rect.left, metrics.viewportRect.right, y, kUiLineSoft);
     }
 
     for (int col = firstVisibleCell; col <= lastVisibleCell; ++col)
     {
-        const int x = rect.left + leftInset + (col * columnWidth) - playlistScrollX_;
+        const int x = metrics.gridRect.left + (col * columnWidth) - playlistScrollX_;
         const bool majorDivision = (col % 4) == 0;
         drawVerticalLine(
             dc,
             x,
-            timelineTop,
-            rect.bottom,
+            metrics.timelineRect.top,
+            metrics.gridRect.bottom,
             majorDivision ? kUiLine : blendColor(kUiPetrol, kUiLineSoft, 1, 6));
 
         if (col < totalCells)
         {
-            RECT beatRect{x + 4, timelineTop + 5, x + 32, gridTop - 4};
+            RECT beatRect{x + 4, metrics.timelineRect.top + 5, x + 32, metrics.timelineRect.bottom - 4};
             SetTextColor(dc, majorDivision ? kUiText : kUiTextSoft);
             const std::string beatLabel = std::to_string(col + 1);
             DrawTextA(dc, beatLabel.c_str(), -1, &beatRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
     }
 
-    drawVerticalLine(dc, rect.left + leftInset, timelineTop, rect.bottom, kUiLine);
+    drawVerticalLine(dc, metrics.gridRect.left, metrics.timelineRect.top, metrics.gridRect.bottom, kUiLine);
 
     for (const auto& marker : workspaceModel_.markers)
     {
-        const int x = rect.left + leftInset + (marker.timelineCell * columnWidth) - playlistScrollX_;
-        if (x < rect.left + leftInset - columnWidth || x > rect.right)
+        const int x = metrics.gridRect.left + (marker.timelineCell * columnWidth) - playlistScrollX_;
+        if (x < metrics.gridRect.left - columnWidth || x > metrics.gridRect.right)
         {
             continue;
         }
-        drawVerticalLine(dc, x, timelineTop, rect.bottom, blendColor(kUiLime, kUiLine, 1, 3));
-
-        RECT markerRect{x + 4, timelineTop + 2, x + 72, timelineTop + 18};
-        SetTextColor(dc, kUiTextSoft);
-        DrawTextA(dc, marker.name.c_str(), -1, &markerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        drawVerticalLine(dc, x, metrics.timelineRect.top, metrics.gridRect.bottom, blendColor(kUiLime, kUiLine, 1, 3));
     }
 
     rebuildPlaylistVisuals(rect);
@@ -1307,6 +1301,13 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         DeleteObject(marqueePen);
     }
 
+    fillRectColor(dc, metrics.horizontalScrollRect, kPlaylistScrollTrack);
+    fillRectColor(dc, metrics.verticalScrollRect, kPlaylistScrollTrack);
+    fillRectColor(dc, metrics.scrollCornerRect, kPlaylistScrollTrack);
+    fillRectColor(dc, horizontalThumb, kPlaylistScrollThumb);
+    fillRectColor(dc, verticalThumb, kPlaylistScrollThumb);
+    drawSurfaceFrame(dc, horizontalThumb, blendColor(kPlaylistScrollThumb, kUiShadow, 2, 3));
+    drawSurfaceFrame(dc, verticalThumb, blendColor(kPlaylistScrollThumb, kUiShadow, 2, 3));
     drawSurfaceFrame(dc, rect, kUiLine);
 }
 
@@ -1387,15 +1388,83 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
 
     if (kind == SurfaceKind::Playlist)
     {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+        const int contentWidth = playlistTotalCellCount() * playlistColumnWidth(metrics.visibleGridWidth);
+        const int contentHeight = playlistContentHeightForViewport(playlistTrackLaneCount(), metrics.visibleGridHeight);
+        const RECT horizontalThumb =
+            makeScrollbarThumbRect(
+                metrics.horizontalScrollRect,
+                std::max(metrics.visibleGridWidth, contentWidth),
+                metrics.visibleGridWidth,
+                playlistScrollX_,
+                true);
+        const RECT verticalThumb =
+            makeScrollbarThumbRect(
+                metrics.verticalScrollRect,
+                std::max(metrics.visibleGridHeight, contentHeight),
+                metrics.visibleGridHeight,
+                playlistScrollY_,
+                false);
+        const POINT hitPoint{x, y};
         bool hitClip = false;
         const bool sliceToolActive = workspace_.playlistTool == EditorTool::Slice;
         interactionState_.draggingClip = false;
         interactionState_.resizingClipLeft = false;
         interactionState_.resizingClipRight = false;
         interactionState_.editingAutomationPoint = false;
+        interactionState_.draggingPlaylistHorizontalScroll = false;
+        interactionState_.draggingPlaylistVerticalScroll = false;
+        interactionState_.playlistScrollDragOffset = 0;
         interactionState_.selectedClipId = 0;
         interactionState_.selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
         interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(-1);
+
+        if (PtInRect(&metrics.horizontalScrollRect, hitPoint))
+        {
+            const int thumbWidth = std::max(1, rectWidth(horizontalThumb));
+            int thumbLeft = horizontalThumb.left;
+            if (!PtInRect(&horizontalThumb, hitPoint))
+            {
+                thumbLeft = clampValue(x - (thumbWidth / 2), metrics.horizontalScrollRect.left, metrics.horizontalScrollRect.right - thumbWidth);
+                const int trackTravel = std::max(1, rectWidth(metrics.horizontalScrollRect) - thumbWidth);
+                const int maxScrollX = std::max(0, std::max(metrics.visibleGridWidth, contentWidth) - metrics.visibleGridWidth);
+                const int nextScrollX =
+                    maxScrollX == 0
+                        ? 0
+                        : ((thumbLeft - metrics.horizontalScrollRect.left) * maxScrollX) / trackTravel;
+                scrollPlaylistTo(nextScrollX, playlistScrollY_);
+            }
+
+            interactionState_.draggingPlaylistHorizontalScroll = true;
+            interactionState_.playlistScrollDragOffset = x - thumbLeft;
+            invalidateSurface(hwnd);
+            return;
+        }
+
+        if (PtInRect(&metrics.verticalScrollRect, hitPoint))
+        {
+            const int thumbHeight = std::max(1, rectHeight(verticalThumb));
+            int thumbTop = verticalThumb.top;
+            if (!PtInRect(&verticalThumb, hitPoint))
+            {
+                thumbTop = clampValue(y - (thumbHeight / 2), metrics.verticalScrollRect.top, metrics.verticalScrollRect.bottom - thumbHeight);
+                const int trackTravel = std::max(1, rectHeight(metrics.verticalScrollRect) - thumbHeight);
+                const int maxScrollY = std::max(0, std::max(metrics.visibleGridHeight, contentHeight) - metrics.visibleGridHeight);
+                const int nextScrollY =
+                    maxScrollY == 0
+                        ? 0
+                        : ((thumbTop - metrics.verticalScrollRect.top) * maxScrollY) / trackTravel;
+                scrollPlaylistTo(playlistScrollX_, nextScrollY);
+            }
+
+            interactionState_.draggingPlaylistVerticalScroll = true;
+            interactionState_.playlistScrollDragOffset = y - thumbTop;
+            invalidateSurface(hwnd);
+            return;
+        }
+
         for (auto& automation : workspaceModel_.automationLanes)
         {
             automation.selected = false;
@@ -1572,7 +1641,57 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
 
     interactionState_.dragCurrent = POINT{x, y};
 
-    if (kind == SurfaceKind::Playlist && interactionState_.draggingClip)
+    if (kind == SurfaceKind::Playlist && interactionState_.draggingPlaylistHorizontalScroll)
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+        const int contentWidth = std::max(metrics.visibleGridWidth, playlistTotalCellCount() * playlistColumnWidth(metrics.visibleGridWidth));
+        const RECT thumbRect =
+            makeScrollbarThumbRect(
+                metrics.horizontalScrollRect,
+                contentWidth,
+                metrics.visibleGridWidth,
+                playlistScrollX_,
+                true);
+        const int thumbWidth = std::max(1, rectWidth(thumbRect));
+        const int maxScrollX = std::max(0, contentWidth - metrics.visibleGridWidth);
+        const int trackTravel = std::max(1, rectWidth(metrics.horizontalScrollRect) - thumbWidth);
+        const int nextThumbLeft =
+            clampValue(x - interactionState_.playlistScrollDragOffset, metrics.horizontalScrollRect.left, metrics.horizontalScrollRect.right - thumbWidth);
+        const int nextScrollX =
+            maxScrollX == 0
+                ? 0
+                : ((nextThumbLeft - metrics.horizontalScrollRect.left) * maxScrollX) / trackTravel;
+        scrollPlaylistTo(nextScrollX, playlistScrollY_);
+        return;
+    }
+    else if (kind == SurfaceKind::Playlist && interactionState_.draggingPlaylistVerticalScroll)
+    {
+        RECT clientRect{};
+        GetClientRect(hwnd, &clientRect);
+        const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+        const int contentHeight = std::max(metrics.visibleGridHeight, playlistContentHeightForViewport(playlistTrackLaneCount(), metrics.visibleGridHeight));
+        const RECT thumbRect =
+            makeScrollbarThumbRect(
+                metrics.verticalScrollRect,
+                contentHeight,
+                metrics.visibleGridHeight,
+                playlistScrollY_,
+                false);
+        const int thumbHeight = std::max(1, rectHeight(thumbRect));
+        const int maxScrollY = std::max(0, contentHeight - metrics.visibleGridHeight);
+        const int trackTravel = std::max(1, rectHeight(metrics.verticalScrollRect) - thumbHeight);
+        const int nextThumbTop =
+            clampValue(y - interactionState_.playlistScrollDragOffset, metrics.verticalScrollRect.top, metrics.verticalScrollRect.bottom - thumbHeight);
+        const int nextScrollY =
+            maxScrollY == 0
+                ? 0
+                : ((nextThumbTop - metrics.verticalScrollRect.top) * maxScrollY) / trackTravel;
+        scrollPlaylistTo(playlistScrollX_, nextScrollY);
+        return;
+    }
+    else if (kind == SurfaceKind::Playlist && interactionState_.draggingClip)
     {
         const int dx = x - interactionState_.dragStart.x;
         const int dy = y - interactionState_.dragStart.y;
@@ -1617,10 +1736,10 @@ void UI::handleSurfaceMouseMove(HWND hwnd, SurfaceKind kind, int x, int y, WPARA
     {
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
+        const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
         const int laneHeight = kPlaylistLaneHeight;
-        const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
         auto& automation = workspaceModel_.automationLanes[interactionState_.selectedAutomationLaneIndex];
-        const int clipY = timelineHeight + 6 + (automation.lane * laneHeight);
+        const int clipY = metrics.gridRect.top + 6 + (automation.lane * laneHeight) - playlistScrollY_;
         const int normalized = clampValue(100 - ((y - clipY) * 100) / std::max<int>(10, laneHeight - 10), 0, 100);
         automation.values[interactionState_.selectedAutomationPointIndex] = normalized;
     }
@@ -1801,12 +1920,15 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
 
     if (kind == SurfaceKind::Playlist)
     {
+        const bool playlistScrollManipulated =
+            interactionState_.draggingPlaylistHorizontalScroll ||
+            interactionState_.draggingPlaylistVerticalScroll;
         const bool playlistClipManipulated =
             interactionState_.draggingClip ||
             interactionState_.resizingClipLeft ||
             interactionState_.resizingClipRight;
 
-        if (interactionState_.selectedClipId != 0)
+        if (!playlistScrollManipulated && interactionState_.selectedClipId != 0)
         {
             const auto clipIt = std::find_if(
                 interactionState_.playlistClipVisuals.begin(),
@@ -1818,14 +1940,12 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             {
                 RECT clientRect{};
                 GetClientRect(hwnd, &clientRect);
+                const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
                 const int laneHeight = kPlaylistLaneHeight;
-                const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
-                const int leftInset = kPlaylistTrackHeaderWidth;
-                const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
-                const int columnWidth = playlistColumnWidth(std::max<int>(1, clientWidth - leftInset));
-                const int targetLane = std::max<int>(0, (clipIt->rect.y + playlistScrollY_ - timelineHeight) / laneHeight);
+                const int columnWidth = playlistColumnWidth(metrics.visibleGridWidth);
+                const int targetLane = std::max<int>(0, (clipIt->rect.y + playlistScrollY_ - metrics.gridRect.top) / laneHeight);
                 const int targetStartCell =
-                    clampValue((clipIt->rect.x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
+                    clampValue((clipIt->rect.x + playlistScrollX_ - metrics.gridRect.left) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
                 const int targetLengthCells =
                     std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
 
@@ -1899,7 +2019,7 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
                         const int clipEndCell = blockIt->startCell + blockIt->lengthCells;
                         const int splitCell =
                             clampValue(
-                                (x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth),
+                                (x + playlistScrollX_ - metrics.gridRect.left) / std::max<int>(1, columnWidth),
                                 blockIt->startCell + 1,
                                 clipEndCell - 1);
 
@@ -1934,23 +2054,23 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
             }
         }
 
-        if (workspace_.playlistTool == EditorTool::Draw &&
+        if (!playlistScrollManipulated &&
+            workspace_.playlistTool == EditorTool::Draw &&
             interactionState_.selectedClipId == 0 &&
             !interactionState_.marqueeActive &&
             !visibleState_.project.tracks.empty())
         {
             RECT clientRect{};
             GetClientRect(hwnd, &clientRect);
-            const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
-            const int leftInset = kPlaylistTrackHeaderWidth;
-            if (x >= leftInset && y >= timelineHeight)
+            const PlaylistLayoutMetrics metrics = makePlaylistLayoutMetrics(clientRect);
+            if (x >= metrics.gridRect.left && y >= metrics.gridRect.top &&
+                x < metrics.gridRect.right && y < metrics.gridRect.bottom)
             {
-                const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
-                const int columnWidth = playlistColumnWidth(std::max<int>(1, clientWidth - leftInset));
-                const int targetLane = std::max<int>(0, (y + playlistScrollY_ - timelineHeight) / kPlaylistLaneHeight);
+                const int columnWidth = playlistColumnWidth(metrics.visibleGridWidth);
+                const int targetLane = std::max<int>(0, (y + playlistScrollY_ - metrics.gridRect.top) / kPlaylistLaneHeight);
                 const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
                 const int targetCell =
-                    clampValue((x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
+                    clampValue((x + playlistScrollX_ - metrics.gridRect.left) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
 
                 selectedTrackIndex_ = static_cast<std::size_t>(safeLane);
 
@@ -2019,16 +2139,17 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     interactionState_.mouseDown = false;
     interactionState_.draggingClip = false;
     interactionState_.draggingNote = false;
+    interactionState_.draggingPlaylistHorizontalScroll = false;
+    interactionState_.draggingPlaylistVerticalScroll = false;
     interactionState_.resizingClipLeft = false;
     interactionState_.resizingClipRight = false;
     interactionState_.resizingNote = false;
     interactionState_.editingAutomationPoint = false;
     interactionState_.browserDragActive = false;
     interactionState_.marqueeActive = false;
+    interactionState_.playlistScrollDragOffset = 0;
     interactionState_.selectedAutomationLaneIndex = static_cast<std::size_t>(-1);
     interactionState_.selectedAutomationPointIndex = static_cast<std::size_t>(-1);
     ReleaseCapture();
     invalidateSurface(hwnd);
 }
-
-
