@@ -195,7 +195,30 @@ void UI::cycleBrowserTab(int delta)
 
 void UI::cycleEditorTool(bool pianoRoll, int delta)
 {
-    EditorTool& tool = pianoRoll ? workspace_.pianoTool : workspace_.playlistTool;
+    if (!pianoRoll)
+    {
+        static constexpr EditorTool kPlaylistTools[] = {EditorTool::Draw, EditorTool::Slice};
+        constexpr int kPlaylistToolCount = static_cast<int>(sizeof(kPlaylistTools) / sizeof(kPlaylistTools[0]));
+        int currentIndex = 0;
+        for (int index = 0; index < kPlaylistToolCount; ++index)
+        {
+            if (workspace_.playlistTool == kPlaylistTools[index])
+            {
+                currentIndex = index;
+                break;
+            }
+        }
+
+        currentIndex += delta;
+        if (currentIndex < 0)
+        {
+            currentIndex = kPlaylistToolCount - 1;
+        }
+        workspace_.playlistTool = kPlaylistTools[currentIndex % kPlaylistToolCount];
+        return;
+    }
+
+    EditorTool& tool = workspace_.pianoTool;
     int current = static_cast<int>(tool);
     current += delta;
     if (current < 0)
@@ -265,7 +288,7 @@ std::string UI::currentSnapLabel() const
 
 std::string UI::currentBrowserTabLabel() const
 {
-    return kBrowserTabs[std::min<std::size_t>(workspace_.browserTabIndex, kBrowserTabCount - 1)];
+    return kBrowserTabs[0];
 }
 
 std::string UI::currentZoomLabel(bool pianoRoll) const
@@ -281,11 +304,11 @@ std::string UI::currentToolLabel(bool pianoRoll) const
     switch (tool)
     {
     case EditorTool::Draw: return "Draw";
-    case EditorTool::Paint: return "Paint";
-    case EditorTool::Select: return "Select";
-    case EditorTool::DeleteTool: return "Delete";
     case EditorTool::Slice: return "Slice";
-    case EditorTool::Mute: return "Mute";
+    case EditorTool::Paint: return pianoRoll ? "Paint" : "Draw";
+    case EditorTool::Select: return pianoRoll ? "Select" : "Draw";
+    case EditorTool::DeleteTool: return pianoRoll ? "Delete" : "Draw";
+    case EditorTool::Mute: return pianoRoll ? "Mute" : "Slice";
     default: return "Draw";
     }
 }
@@ -293,7 +316,7 @@ std::string UI::currentToolLabel(bool pianoRoll) const
 std::string UI::buildBrowserPanelText() const
 {
     std::ostringstream browser;
-    browser << "Browser\n\n";
+    browser << "Project\n\n";
     for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
     {
         const BrowserEntry& entry = workspaceModel_.browserEntries[index];
@@ -310,9 +333,7 @@ std::string UI::buildBrowserPanelText() const
                 << entry.category << " | " << entry.subtitle << "\n";
     }
 
-    browser
-        << "\nDrag-drop target: " << browserDropTargetLabel()
-        << "\nAlt+F8 toggles this panel.";
+    browser << "\nPatterns and audio clips stay synced with the current project.";
     return browser.str();
 }
 
@@ -440,20 +461,20 @@ std::string UI::buildPlaylistPanelText() const
         << " | Patterns loaded: " << workspaceModel_.patterns.size()
         << "\nTimeline: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8\n\n";
 
-    if (workspaceModel_.playlistBlocks.empty() && workspaceModel_.automationLanes.empty())
+    if (workspaceModel_.playlistBlocks.empty())
     {
         playlist << "Track 1  [empty lane]\n";
     }
     else
     {
-        const int laneCount = std::max(1, static_cast<int>(workspaceModel_.patternLanes.size() + workspaceModel_.automationLanes.size()));
+        const int laneCount = std::max(1, static_cast<int>(visibleState_.project.tracks.size()));
         for (int lane = 0; lane < laneCount; ++lane)
         {
             const std::string laneName =
-                lane < static_cast<int>(workspaceModel_.patternLanes.size())
-                    ? workspaceModel_.patternLanes[static_cast<std::size_t>(lane)].name
-                    : ("Auto " + workspaceModel_.automationLanes[static_cast<std::size_t>(lane - static_cast<int>(workspaceModel_.patternLanes.size()))].target);
-            playlist << "Lane " << (lane + 1) << " " << laneName << " : ";
+                lane < static_cast<int>(visibleState_.project.tracks.size())
+                    ? visibleState_.project.tracks[static_cast<std::size_t>(lane)].name
+                    : ("Track " + std::to_string(lane + 1));
+            playlist << "Track " << (lane + 1) << " " << laneName << " : ";
 
             bool any = false;
             for (const auto& block : workspaceModel_.playlistBlocks)
@@ -466,14 +487,6 @@ std::string UI::buildPlaylistPanelText() const
                         playlist << " P" << block.patternNumber;
                     }
                     playlist << "] ";
-                    any = true;
-                }
-            }
-            for (const auto& automation : workspaceModel_.automationLanes)
-            {
-                if (automation.lane == lane)
-                {
-                    playlist << "[Auto " << automation.target << " @" << automation.startCell << " len " << automation.lengthCells << "] ";
                     any = true;
                 }
             }
@@ -492,7 +505,7 @@ std::string UI::buildPlaylistPanelText() const
         playlist << "[" << marker.name << " @" << marker.timelineCell << "] ";
     }
     playlist
-        << "\nPattern Clips, Audio Clips and Automation Clips share the same arranger."
+        << "\nPattern clips and audio clips share the same arranger."
         << "\nThis is the arrangement view targeted by F5.";
     return playlist.str();
 }
@@ -847,45 +860,28 @@ void UI::paintSurface(HWND hwnd, SurfaceKind kind)
 
 void UI::paintBrowserSurface(HDC dc, const RECT& rect)
 {
-    drawSurfaceHeader(dc, rect, "Browser", "Compact navigator");
+    const int contentTop = rect.top + 2;
+    const int visibleBottom = rect.bottom - 2;
 
-    const int tabLeft = rect.left + 8;
-    const int tabTop = rect.top + kSurfaceHeaderHeight + 4;
-    const int clientWidth = static_cast<int>(rect.right - rect.left);
-    const int tabWidth = std::max(56, (clientWidth - 16 - ((kBrowserTabCount - 1) * 4)) / kBrowserTabCount);
-    const int contentTop = tabTop + kBrowserTabHeight + 8;
-    const int footerHeight = 28;
-
-    RECT contentRect{rect.left + 1, contentTop, rect.right - 1, rect.bottom - footerHeight - 2};
+    RECT contentRect{rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1};
     fillRectColor(dc, contentRect, blendColor(kUiGraphite, kUiShadow, 1, 5));
 
-    for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
-    {
-        RECT tabRect{
-            tabLeft + tabIndex * (tabWidth + 4),
-            tabTop,
-            tabLeft + tabIndex * (tabWidth + 4) + tabWidth,
-            tabTop + kBrowserTabHeight};
-        const bool selected = static_cast<std::size_t>(tabIndex) == workspace_.browserTabIndex;
-        fillRectColor(
-            dc,
-            tabRect,
-            selected ? blendColor(kUiPetrol, kUiAnthracite, 1, 2) : blendColor(kUiAnthracite, kUiShadow, 1, 4));
-        drawSurfaceFrame(dc, tabRect, selected ? blendColor(kUiLime, kUiLine, 1, 4) : kUiLineSoft);
-        SetTextColor(dc, selected ? kUiLime : kUiTextSoft);
-        DrawTextA(dc, kBrowserTabs[tabIndex], -1, &tabRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-
-    int y = contentTop;
+    int y = contentTop - browserScrollY_;
     for (std::size_t index = 0; index < workspaceModel_.browserEntries.size(); ++index)
     {
-        if (y + kBrowserRowHeight > rect.bottom - footerHeight - 6)
+        const BrowserEntry& entry = workspaceModel_.browserEntries[index];
+        RECT itemRect{rect.left + 6, y, rect.right - 6, y + kBrowserRowHeight};
+        y += kBrowserRowHeight;
+
+        if (itemRect.bottom < contentTop)
+        {
+            continue;
+        }
+        if (itemRect.top > visibleBottom)
         {
             break;
         }
 
-        const BrowserEntry& entry = workspaceModel_.browserEntries[index];
-        RECT itemRect{rect.left + 6, y, rect.right - 6, y + kBrowserRowHeight};
         const bool selected = static_cast<int>(index) == workspaceModel_.selectedBrowserIndex;
         fillRectColor(
             dc,
@@ -908,15 +904,21 @@ void UI::paintBrowserSurface(HDC dc, const RECT& rect)
         {
             drawCollapseTriangle(dc, treeX, centerY - 4, entry.expanded, selected ? kUiText : kUiTextSoft);
         }
+        else if (entry.folder)
+        {
+            RECT folderRect{treeX, centerY - 4, treeX + 10, centerY + 4};
+            fillRectColor(dc, folderRect, RGB(188, 150, 81));
+            drawSurfaceFrame(dc, folderRect, RGB(120, 91, 44));
+        }
         else
         {
             RECT iconRect{treeX, centerY - 3, treeX + 6, centerY + 3};
             fillRectColor(dc, iconRect, entry.favorite ? kUiLime : blendColor(kUiLine, kUiTextDim, 1, 2));
         }
 
-        RECT labelRect{treeX + 14, itemRect.top + 3, itemRect.right - 68, itemRect.top + 15};
-        RECT subtitleRect{treeX + 14, itemRect.top + 14, itemRect.right - 68, itemRect.bottom - 3};
-        RECT categoryRect{itemRect.right - 64, itemRect.top + 3, itemRect.right - 10, itemRect.top + 15};
+        RECT labelRect{treeX + 16, itemRect.top + 3, itemRect.right - 74, itemRect.top + 16};
+        RECT subtitleRect{treeX + 16, itemRect.top + 14, itemRect.right - 74, itemRect.bottom - 3};
+        RECT categoryRect{itemRect.right - 70, itemRect.top + 3, itemRect.right - 10, itemRect.top + 15};
 
         SetTextColor(dc, selected ? kUiText : (entry.group ? kUiTextSoft : kUiText));
         DrawTextA(dc, entry.label.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -926,15 +928,7 @@ void UI::paintBrowserSurface(HDC dc, const RECT& rect)
 
         SetTextColor(dc, entry.favorite ? kUiLimeDim : kUiTextDim);
         DrawTextA(dc, entry.category.c_str(), -1, &categoryRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        y += kBrowserRowHeight;
     }
-
-    RECT footerRect{rect.left + 8, rect.bottom - footerHeight, rect.right - 8, rect.bottom - 8};
-    fillRectColor(dc, footerRect, blendColor(kUiAnthracite, kUiShadow, 1, 4));
-    drawHorizontalLine(dc, footerRect.left, footerRect.right, footerRect.top, kUiLineSoft);
-    SetTextColor(dc, kUiTextSoft);
-    DrawTextA(dc, browserDropTargetLabel().c_str(), -1, &footerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     drawSurfaceFrame(dc, rect, kUiLine);
 }
 
@@ -1171,10 +1165,23 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     const int timelineHeight = kPlaylistTimelineHeight;
     const int gridTop = timelineTop + timelineHeight;
     const int leftInset = kPlaylistTrackHeaderWidth;
-    const int columns = kPlaylistCellCount;
-    const int laneCount = std::max<int>(10, static_cast<int>(workspaceModel_.patternLanes.size() + workspaceModel_.automationLanes.size()));
-    const int playlistWidth = std::max<int>(120, static_cast<int>(rect.right - rect.left) - leftInset);
-    const int columnWidth = std::max<int>(24, playlistWidth / columns);
+    const int visibleGridWidth = std::max<int>(1, static_cast<int>(rect.right - rect.left) - leftInset);
+    const int visibleGridHeight = std::max<int>(1, static_cast<int>(rect.bottom - gridTop));
+    const int totalCells = playlistTotalCellCount();
+    const int columnWidth = playlistColumnWidth(visibleGridWidth);
+    const int trackCount = playlistTrackLaneCount();
+    const int laneCount =
+        std::max(
+            trackCount + 8,
+            std::max(
+                kPlaylistMinVisibleTracks,
+                (playlistScrollY_ + visibleGridHeight + laneHeight - 1) / laneHeight + 1));
+    const int firstVisibleCell = std::max(0, playlistScrollX_ / std::max(1, columnWidth));
+    const int visibleCellCount = (visibleGridWidth / std::max(1, columnWidth)) + 3;
+    const int lastVisibleCell = std::min(totalCells, firstVisibleCell + visibleCellCount);
+    const int firstVisibleLane = std::max(0, playlistScrollY_ / laneHeight);
+    const int visibleLaneCount = (visibleGridHeight / laneHeight) + 3;
+    const int lastVisibleLane = std::min(laneCount, firstVisibleLane + visibleLaneCount);
 
     RECT trackHeaderRect{rect.left, gridTop, rect.left + leftInset, rect.bottom};
     fillRectColor(dc, trackHeaderRect, blendColor(kUiAnthracite, kUiShadow, 1, 5));
@@ -1188,27 +1195,16 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
     RECT gridRect{rect.left + leftInset, gridTop, rect.right, rect.bottom};
     fillRectColor(dc, gridRect, blendColor(kUiPetrol, kUiShadow, 1, 5));
 
-    for (int lane = 0; lane < laneCount; ++lane)
+    for (int lane = firstVisibleLane; lane < lastVisibleLane; ++lane)
     {
-        const int y = gridTop + (lane * laneHeight);
-        const bool isTrackLane = lane < static_cast<int>(workspaceModel_.patternLanes.size());
-        const int automationIndex = lane - static_cast<int>(workspaceModel_.patternLanes.size());
-        const bool isAutomationLane =
-            !isTrackLane && automationIndex >= 0 && automationIndex < static_cast<int>(workspaceModel_.automationLanes.size());
-        const bool laneSelected =
-            isTrackLane &&
-            (static_cast<std::size_t>(lane) == selectedTrackIndex_ ||
-             static_cast<int>(workspaceModel_.activeChannelIndex) == lane);
+        const int y = gridTop + (lane * laneHeight) - playlistScrollY_;
+        const bool isTrackLane = lane < trackCount;
+        const bool laneSelected = isTrackLane && static_cast<std::size_t>(lane) == selectedTrackIndex_;
         const std::string laneName =
             isTrackLane
-                ? workspaceModel_.patternLanes[static_cast<std::size_t>(lane)].name
-                : (isAutomationLane
-                       ? ("Automation " + workspaceModel_.automationLanes[static_cast<std::size_t>(automationIndex)].target)
-                       : ("Track " + std::to_string(lane + 1)));
-        const std::string laneMeta =
-            isTrackLane
-                ? ("Track " + std::to_string(lane + 1))
-                : (isAutomationLane ? "Automation lane" : "Lane");
+                ? visibleState_.project.tracks[static_cast<std::size_t>(lane)].name
+                : ("Track " + std::to_string(lane + 1));
+        const std::string laneMeta = "Track " + std::to_string(lane + 1);
 
         RECT laneRect{rect.left + leftInset, y, rect.right, y + laneHeight};
         RECT headerLaneRect{rect.left, y, rect.left + leftInset, y + laneHeight};
@@ -1229,7 +1225,7 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         RECT labelRect{rect.left + 12, y + 15, rect.left + leftInset - 30, y + laneHeight - 4};
         SetTextColor(dc, kUiTextDim);
         DrawTextA(dc, laneMeta.c_str(), -1, &metaRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        SetTextColor(dc, isAutomationLane ? blendColor(kUiText, RGB(216, 180, 196), 1, 4) : kUiText);
+        SetTextColor(dc, isTrackLane ? kUiText : kUiTextSoft);
         DrawTextA(dc, laneName.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         if (isTrackLane)
@@ -1237,18 +1233,13 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
             RECT indicatorRect{rect.left + leftInset - 18, y + (laneHeight / 2) - 4, rect.left + leftInset - 10, y + (laneHeight / 2) + 4};
             drawFilledCircle(dc, indicatorRect, laneSelected ? kUiLime : kUiLimeDim, blendColor(kUiLime, kUiShadow, 1, 3));
         }
-        else if (isAutomationLane)
-        {
-            RECT indicatorRect{rect.left + leftInset - 18, y + (laneHeight / 2) - 3, rect.left + leftInset - 10, y + (laneHeight / 2) + 3};
-            fillRectColor(dc, indicatorRect, blendColor(kUiTextSoft, kUiAnthracite, 1, 2));
-        }
 
         drawHorizontalLine(dc, rect.left, rect.right, y, kUiLineSoft);
     }
 
-    for (int col = 0; col <= columns; ++col)
+    for (int col = firstVisibleCell; col <= lastVisibleCell; ++col)
     {
-        const int x = rect.left + leftInset + (col * columnWidth);
+        const int x = rect.left + leftInset + (col * columnWidth) - playlistScrollX_;
         const bool majorDivision = (col % 4) == 0;
         drawVerticalLine(
             dc,
@@ -1257,7 +1248,7 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
             rect.bottom,
             majorDivision ? kUiLine : blendColor(kUiPetrol, kUiLineSoft, 1, 6));
 
-        if (col < columns)
+        if (col < totalCells)
         {
             RECT beatRect{x + 4, timelineTop + 5, x + 32, gridTop - 4};
             SetTextColor(dc, majorDivision ? kUiText : kUiTextSoft);
@@ -1270,7 +1261,11 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 
     for (const auto& marker : workspaceModel_.markers)
     {
-        const int x = rect.left + leftInset + (marker.timelineCell * columnWidth);
+        const int x = rect.left + leftInset + (marker.timelineCell * columnWidth) - playlistScrollX_;
+        if (x < rect.left + leftInset - columnWidth || x > rect.right)
+        {
+            continue;
+        }
         drawVerticalLine(dc, x, timelineTop, rect.bottom, blendColor(kUiLime, kUiLine, 1, 3));
 
         RECT markerRect{x + 4, timelineTop + 2, x + 72, timelineTop + 18};
@@ -1282,11 +1277,6 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
 
     for (const auto& clip : interactionState_.playlistClipVisuals)
     {
-        if (clip.automation)
-        {
-            continue;
-        }
-
         RECT clipRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
         const bool isAudioClip = clip.clipType == "Audio";
         fillRectColor(
@@ -1305,56 +1295,6 @@ void UI::paintPlaylistSurface(HDC dc, const RECT& rect)
         SetTextColor(dc, kUiText);
         DrawTextA(dc, clip.label.c_str(), -1, &clipLabelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-
-    HPEN automationPen = CreatePen(PS_SOLID, 2, RGB(214, 187, 200));
-    for (const auto& clip : interactionState_.playlistClipVisuals)
-    {
-        if (!clip.automation)
-        {
-            continue;
-        }
-
-        auto automationIt = std::find_if(
-            workspaceModel_.automationLanes.begin(),
-            workspaceModel_.automationLanes.end(),
-            [&](const AutomationLaneState& automation) { return automation.clipId == clip.clipId; });
-        if (automationIt == workspaceModel_.automationLanes.end())
-        {
-            continue;
-        }
-
-        RECT automationRect{clip.rect.x, clip.rect.y, clip.rect.x + clip.rect.width, clip.rect.y + clip.rect.height};
-        fillRectColor(
-            dc,
-            automationRect,
-            automationIt->selected ? RGB(118, 92, 108) : RGB(94, 74, 86));
-        drawSurfaceFrame(dc, automationRect, automationIt->selected ? blendColor(kUiLime, kUiLine, 1, 4) : kUiLineSoft);
-
-        RECT rightHandle{automationRect.right - 6, automationRect.top, automationRect.right, automationRect.bottom};
-        fillRectColor(dc, rightHandle, RGB(166, 136, 152));
-
-        HGDIOBJ oldPen = SelectObject(dc, automationPen);
-        const int pointCount = static_cast<int>(automationIt->values.size());
-        for (int point = 0; point < pointCount; ++point)
-        {
-            const int pointX = automationRect.left + ((automationRect.right - automationRect.left - 6) * point) / std::max(1, pointCount - 1) + 3;
-            const int pointY = automationRect.bottom - 4 - ((automationRect.bottom - automationRect.top - 8) * automationIt->values[static_cast<std::size_t>(point)]) / 100;
-            if (point == 0)
-            {
-                MoveToEx(dc, pointX, pointY, nullptr);
-            }
-            else
-            {
-                LineTo(dc, pointX, pointY);
-            }
-        }
-        SelectObject(dc, oldPen);
-
-        RECT labelRect{automationRect.left + 4, automationRect.top + 2, automationRect.right - 4, automationRect.top + 18};
-        SetTextColor(dc, kUiText);
-        DrawTextA(dc, automationIt->target.c_str(), -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-    DeleteObject(automationPen);
 
     if (interactionState_.marqueeActive && interactionState_.activeSurface == SurfaceKind::Playlist)
     {
@@ -1448,6 +1388,7 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     if (kind == SurfaceKind::Playlist)
     {
         bool hitClip = false;
+        const bool sliceToolActive = workspace_.playlistTool == EditorTool::Slice;
         interactionState_.draggingClip = false;
         interactionState_.resizingClipLeft = false;
         interactionState_.resizingClipRight = false;
@@ -1470,11 +1411,15 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
             {
                 hitClip = true;
                 interactionState_.selectedClipId = clip.clipId;
-                const bool leftEdge = x <= (clip.rect.x + 6);
-                const bool rightEdge = x >= (clip.rect.x + clip.rect.width - 6);
-                interactionState_.resizingClipLeft = leftEdge && clip.clipId < 4000;
-                interactionState_.resizingClipRight = rightEdge;
-                interactionState_.draggingClip = !interactionState_.resizingClipLeft && !interactionState_.resizingClipRight;
+                const bool canManipulateClip = !sliceToolActive || clip.clipType != "Pattern";
+                if (canManipulateClip)
+                {
+                    const bool leftEdge = x <= (clip.rect.x + 6);
+                    const bool rightEdge = x >= (clip.rect.x + clip.rect.width - 6);
+                    interactionState_.resizingClipLeft = leftEdge && clip.clipId < 4000;
+                    interactionState_.resizingClipRight = rightEdge;
+                    interactionState_.draggingClip = !interactionState_.resizingClipLeft && !interactionState_.resizingClipRight;
+                }
                 if (clip.clipId >= 4000)
                 {
                     for (std::size_t automationIndex = 0; automationIndex < workspaceModel_.automationLanes.size(); ++automationIndex)
@@ -1506,7 +1451,10 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
                 }
             }
         }
-        if (!hitClip && !interactionState_.editingAutomationPoint)
+        if (!hitClip &&
+            !interactionState_.editingAutomationPoint &&
+            workspace_.playlistTool != EditorTool::Draw &&
+            workspace_.playlistTool != EditorTool::Slice)
         {
             interactionState_.marqueeActive = true;
             interactionState_.marqueeRect = RECT{x, y, x, y};
@@ -1541,37 +1489,41 @@ void UI::handleSurfaceMouseDown(HWND hwnd, SurfaceKind kind, int x, int y)
     }
     else if (kind == SurfaceKind::Browser)
     {
-        RECT clientRect{};
-        GetClientRect(hwnd, &clientRect);
-        const int tabTop = kSurfaceHeaderHeight + 4;
-        const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
-        const int tabWidth = std::max(56, (clientWidth - 16 - ((kBrowserTabCount - 1) * 4)) / kBrowserTabCount);
-        for (int tabIndex = 0; tabIndex < kBrowserTabCount; ++tabIndex)
-        {
-            const int tabLeft = 8 + tabIndex * (tabWidth + 4);
-            if (x >= tabLeft && x <= (tabLeft + tabWidth) && y >= tabTop && y <= (tabTop + kBrowserTabHeight))
-            {
-                workspace_.browserTabIndex = static_cast<std::size_t>(tabIndex);
-                workspaceModel_.selectedBrowserIndex = 0;
-                rebuildBrowserEntries();
-                interactionState_.browserDragActive = false;
-                interactionState_.mouseDown = false;
-                ReleaseCapture();
-                invalidateSurface(hwnd);
-                return;
-            }
-        }
-
         interactionState_.browserDragActive = false;
-        const int contentTop = tabTop + kBrowserTabHeight + 8;
-        const int browserIndex = y < contentTop ? -1 : ((y - contentTop) / kBrowserRowHeight);
+        const int contentTop = 2;
+        const int browserIndex = y < contentTop ? -1 : ((y - contentTop + browserScrollY_) / kBrowserRowHeight);
         if (!workspaceModel_.browserEntries.empty() &&
             browserIndex >= 0 &&
             browserIndex < static_cast<int>(workspaceModel_.browserEntries.size()))
         {
             interactionState_.selectedBrowserItemIndex = static_cast<std::size_t>(browserIndex);
             workspaceModel_.selectedBrowserIndex = browserIndex;
-            interactionState_.browserDragActive = !workspaceModel_.browserEntries[static_cast<std::size_t>(browserIndex)].group;
+            const BrowserEntry& entry = workspaceModel_.browserEntries[static_cast<std::size_t>(browserIndex)];
+            if (entry.group)
+            {
+                toggleBrowserGroup(entry.id);
+                interactionState_.mouseDown = false;
+                ReleaseCapture();
+                return;
+            }
+
+            if (entry.id.rfind("project:pattern:", 0) == 0)
+            {
+                selectPatternByNumber(std::atoi(entry.id.substr(16).c_str()));
+            }
+            else if (entry.id.rfind("project:audio:", 0) == 0)
+            {
+                interactionState_.selectedClipId = static_cast<std::uint32_t>(std::strtoul(entry.id.substr(14).c_str(), nullptr, 10));
+                for (const auto& block : workspaceModel_.playlistBlocks)
+                {
+                    if (block.clipId == interactionState_.selectedClipId)
+                    {
+                        selectedTrackIndex_ = static_cast<std::size_t>(std::max(0, block.lane));
+                        break;
+                    }
+                }
+                invalidateSurface(playlistPanel_);
+            }
         }
     }
     else if (kind == SurfaceKind::ChannelRack)
@@ -1847,80 +1799,167 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
         }
     }
 
-    if (kind == SurfaceKind::Playlist && interactionState_.selectedClipId != 0)
+    if (kind == SurfaceKind::Playlist)
     {
-        const auto clipIt = std::find_if(
-            interactionState_.playlistClipVisuals.begin(),
-            interactionState_.playlistClipVisuals.end(),
-            [&](const UiClipVisual& clip) { return clip.clipId == interactionState_.selectedClipId; });
+        const bool playlistClipManipulated =
+            interactionState_.draggingClip ||
+            interactionState_.resizingClipLeft ||
+            interactionState_.resizingClipRight;
 
-        if (clipIt != interactionState_.playlistClipVisuals.end() &&
-            (clipIt->clipId >= 4000 || !visibleState_.project.tracks.empty()))
+        if (interactionState_.selectedClipId != 0)
+        {
+            const auto clipIt = std::find_if(
+                interactionState_.playlistClipVisuals.begin(),
+                interactionState_.playlistClipVisuals.end(),
+                [&](const UiClipVisual& clip) { return clip.clipId == interactionState_.selectedClipId; });
+
+            if (clipIt != interactionState_.playlistClipVisuals.end() &&
+                (clipIt->clipId >= 4000 || !visibleState_.project.tracks.empty()))
+            {
+                RECT clientRect{};
+                GetClientRect(hwnd, &clientRect);
+                const int laneHeight = kPlaylistLaneHeight;
+                const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
+                const int leftInset = kPlaylistTrackHeaderWidth;
+                const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
+                const int columnWidth = playlistColumnWidth(std::max<int>(1, clientWidth - leftInset));
+                const int targetLane = std::max<int>(0, (clipIt->rect.y + playlistScrollY_ - timelineHeight) / laneHeight);
+                const int targetStartCell =
+                    clampValue((clipIt->rect.x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
+                const int targetLengthCells =
+                    std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
+
+                if (playlistClipManipulated)
+                {
+                    if (clipIt->clipId >= 4000)
+                    {
+                        const auto playlistItemIt = std::find_if(
+                            visibleState_.project.playlistItems.begin(),
+                            visibleState_.project.playlistItems.end(),
+                            [&](const AudioEngine::PlaylistItemState& item) { return item.itemId == clipIt->clipId; });
+                        for (auto& automation : workspaceModel_.automationLanes)
+                        {
+                            if (automation.clipId == clipIt->clipId)
+                            {
+                                automation.lane = targetLane;
+                                automation.startCell = targetStartCell;
+                                automation.lengthCells = targetLengthCells;
+                                automation.selected = true;
+                                break;
+                            }
+                        }
+
+                        if (playlistItemIt != visibleState_.project.playlistItems.end())
+                        {
+                            AudioEngine::EngineCommand command{};
+                            command.type = AudioEngine::CommandType::MoveClip;
+                            command.uintValue = clipIt->clipId;
+                            command.secondaryUintValue = playlistItemIt->trackId;
+                            command.doubleValue = static_cast<double>(targetStartCell) / 2.0;
+                            command.textValue = std::to_string(static_cast<double>(targetLengthCells) / 2.0);
+                            engine_.postCommand(command);
+                        }
+                    }
+                    else
+                    {
+                        const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
+                        const double startTime = static_cast<double>(targetStartCell) / 2.0;
+                        const double durationTime = static_cast<double>(targetLengthCells) / 2.0;
+                        for (auto& block : workspaceModel_.playlistBlocks)
+                        {
+                            if (block.clipId == clipIt->clipId)
+                            {
+                                block.lane = safeLane;
+                                block.startCell = targetStartCell;
+                                block.lengthCells = targetLengthCells;
+                                break;
+                            }
+                        }
+
+                        AudioEngine::EngineCommand command{};
+                        command.type = AudioEngine::CommandType::MoveClip;
+                        command.uintValue = clipIt->clipId;
+                        command.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(safeLane)].trackId;
+                        command.doubleValue = startTime;
+                        command.textValue = std::to_string(durationTime);
+                        engine_.postCommand(command);
+                    }
+                }
+                else if (workspace_.playlistTool == EditorTool::Slice &&
+                         clipIt->clipId < 4000 &&
+                         clipIt->clipType == "Pattern")
+                {
+                    const auto blockIt = std::find_if(
+                        workspaceModel_.playlistBlocks.begin(),
+                        workspaceModel_.playlistBlocks.end(),
+                        [&](const PlaylistBlockState& block) { return block.clipId == clipIt->clipId; });
+
+                    if (blockIt != workspaceModel_.playlistBlocks.end())
+                    {
+                        const int clipEndCell = blockIt->startCell + blockIt->lengthCells;
+                        const int splitCell =
+                            clampValue(
+                                (x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth),
+                                blockIt->startCell + 1,
+                                clipEndCell - 1);
+
+                        if (splitCell > blockIt->startCell &&
+                            splitCell < clipEndCell &&
+                            blockIt->lane >= 0 &&
+                            blockIt->lane < static_cast<int>(visibleState_.project.tracks.size()))
+                        {
+                            const double leftDuration = static_cast<double>(splitCell - blockIt->startCell) / 2.0;
+                            const double rightDuration = static_cast<double>(clipEndCell - splitCell) / 2.0;
+                            if (leftDuration >= 0.5 && rightDuration >= 0.5)
+                            {
+                                AudioEngine::EngineCommand leftCommand{};
+                                leftCommand.type = AudioEngine::CommandType::MoveClip;
+                                leftCommand.uintValue = clipIt->clipId;
+                                leftCommand.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(blockIt->lane)].trackId;
+                                leftCommand.doubleValue = static_cast<double>(blockIt->startCell) / 2.0;
+                                leftCommand.textValue = std::to_string(leftDuration);
+                                engine_.postCommand(leftCommand);
+
+                                AudioEngine::EngineCommand rightCommand{};
+                                rightCommand.type = AudioEngine::CommandType::AddClipToTrack;
+                                rightCommand.uintValue = visibleState_.project.tracks[static_cast<std::size_t>(blockIt->lane)].trackId;
+                                rightCommand.textValue = "Pattern " + std::to_string(std::max(1, blockIt->patternNumber));
+                                rightCommand.doubleValue = static_cast<double>(splitCell) / 2.0;
+                                rightCommand.secondaryTextValue = std::to_string(rightDuration);
+                                engine_.postCommand(rightCommand);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (workspace_.playlistTool == EditorTool::Draw &&
+            interactionState_.selectedClipId == 0 &&
+            !interactionState_.marqueeActive &&
+            !visibleState_.project.tracks.empty())
         {
             RECT clientRect{};
             GetClientRect(hwnd, &clientRect);
-            const int laneHeight = kPlaylistLaneHeight;
             const int timelineHeight = kSurfaceHeaderHeight + kPlaylistTimelineHeight;
             const int leftInset = kPlaylistTrackHeaderWidth;
-            const int clientWidth = static_cast<int>(clientRect.right);
-            const int columnWidth = std::max<int>(24, std::max<int>(1, clientWidth - leftInset) / kPlaylistCellCount);
-            const int targetLane = std::max<int>(0, (clipIt->rect.y - timelineHeight) / laneHeight);
-            const int targetStartCell =
-                clampValue((clipIt->rect.x - leftInset) / std::max<int>(1, columnWidth), 0, kPlaylistCellCount - 1);
-            const int targetLengthCells =
-                std::max<int>(2, clipIt->rect.width / std::max<int>(1, columnWidth));
-
-            if (clipIt->clipId >= 4000)
+            if (x >= leftInset && y >= timelineHeight)
             {
-                const auto playlistItemIt = std::find_if(
-                    visibleState_.project.playlistItems.begin(),
-                    visibleState_.project.playlistItems.end(),
-                    [&](const AudioEngine::PlaylistItemState& item) { return item.itemId == clipIt->clipId; });
-                for (auto& automation : workspaceModel_.automationLanes)
-                {
-                    if (automation.clipId == clipIt->clipId)
-                    {
-                        automation.lane = targetLane;
-                        automation.startCell = targetStartCell;
-                        automation.lengthCells = targetLengthCells;
-                        automation.selected = true;
-                        break;
-                    }
-                }
-
-                if (playlistItemIt != visibleState_.project.playlistItems.end())
-                {
-                    AudioEngine::EngineCommand command{};
-                    command.type = AudioEngine::CommandType::MoveClip;
-                    command.uintValue = clipIt->clipId;
-                    command.secondaryUintValue = playlistItemIt->trackId;
-                    command.doubleValue = static_cast<double>(targetStartCell) / 2.0;
-                    command.textValue = std::to_string(static_cast<double>(targetLengthCells) / 2.0);
-                    engine_.postCommand(command);
-                }
-            }
-            else
-            {
+                const int clientWidth = static_cast<int>(clientRect.right - clientRect.left);
+                const int columnWidth = playlistColumnWidth(std::max<int>(1, clientWidth - leftInset));
+                const int targetLane = std::max<int>(0, (y + playlistScrollY_ - timelineHeight) / kPlaylistLaneHeight);
                 const int safeLane = clampValue(targetLane, 0, static_cast<int>(visibleState_.project.tracks.size() - 1));
-                const double startTime = static_cast<double>(targetStartCell) / 2.0;
-                const double durationTime = static_cast<double>(targetLengthCells) / 2.0;
-                for (auto& block : workspaceModel_.playlistBlocks)
-                {
-                    if (block.clipId == clipIt->clipId)
-                    {
-                        block.lane = safeLane;
-                        block.startCell = targetStartCell;
-                        block.lengthCells = targetLengthCells;
-                        break;
-                    }
-                }
+                const int targetCell =
+                    clampValue((x + playlistScrollX_ - leftInset) / std::max<int>(1, columnWidth), 0, playlistTotalCellCount() - 1);
+
+                selectedTrackIndex_ = static_cast<std::size_t>(safeLane);
 
                 AudioEngine::EngineCommand command{};
-                command.type = AudioEngine::CommandType::MoveClip;
-                command.uintValue = clipIt->clipId;
-                command.secondaryUintValue = visibleState_.project.tracks[static_cast<std::size_t>(safeLane)].trackId;
-                command.doubleValue = startTime;
-                command.textValue = std::to_string(durationTime);
+                command.type = AudioEngine::CommandType::AddClipToTrack;
+                command.uintValue = visibleState_.project.tracks[static_cast<std::size_t>(safeLane)].trackId;
+                command.textValue = "Pattern " + std::to_string(std::max(1, workspace_.activePattern));
+                command.doubleValue = static_cast<double>(targetCell) / 2.0;
+                command.secondaryTextValue = std::to_string(getPatternPlaybackLengthSeconds());
                 engine_.postCommand(command);
             }
         }
@@ -1991,4 +2030,5 @@ void UI::handleSurfaceMouseUp(HWND hwnd, SurfaceKind kind, int x, int y)
     ReleaseCapture();
     invalidateSurface(hwnd);
 }
+
 
